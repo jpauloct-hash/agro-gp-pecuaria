@@ -39,7 +39,7 @@
   }
   </script>
 
-  <!-- O Babel precisa estar carregado antes do módulo que chama Babel.transform(). -->
+  <!-- Babel precisa estar disponível antes da execução do módulo principal. -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 
@@ -50,6 +50,9 @@
   <script type="module">
     import React from "react";
     import { createRoot } from "react-dom/client";
+
+    // Compatibilidade adicional para componentes JSX compilados no modo clássico.
+    window.React = React;
 
     const errorDisplay = document.getElementById("error-display");
 
@@ -90,11 +93,17 @@
         sourceType: "module"
       }).code;
 
-      const blob = new Blob(
-        [transformed + "\n//# sourceURL=agro-gp-pecuaria.compilado.js"],
-        { type: "text/javascript" }
-      );
+      /*
+        A importação abaixo torna o bundle robusto mesmo se alguma parte do JSX
+        tiver sido compilada no modo clássico e ainda chamar React.createElement.
+      */
+      const codigoExecutavel =
+        'import React from "react";\n' +
+        'window.React = React;\n' +
+        transformed +
+        "\n//# sourceURL=agro-gp-pecuaria.compilado.js";
 
+      const blob = new Blob([codigoExecutavel], { type: "text/javascript" });
       const moduleUrl = URL.createObjectURL(blob);
 
       try {
