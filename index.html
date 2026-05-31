@@ -4,7 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Agro GP Pecuária — Simulador de Confinamento</title>
-  <meta name="description" content="Simulador educativo de confinamento bovino. Compra boi magro, alimenta, vende gordo. Entenda o triângulo de risco da pecuária." />
+  <meta
+    name="description"
+    content="Simulador educativo de confinamento bovino. Compra boi magro, alimenta, vende gordo. Entenda o triângulo de risco da pecuária."
+  />
 
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,41 +33,89 @@
       "react": "https://esm.sh/react@18.3.1",
       "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
       "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "react/jsx-dev-runtime": "https://esm.sh/react@18.3.1/jsx-dev-runtime",
       "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
     }
   }
   </script>
+
+  <!-- O Babel precisa estar carregado antes do módulo que chama Babel.transform(). -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
+
 <body>
   <div id="root"></div>
   <div id="error-display"></div>
 
   <script type="module">
-    window.addEventListener('error', (e) => {
-      const el = document.getElementById('error-display');
-      el.style.display = 'block';
-      el.textContent = `Erro: ${e.message}\n${e.filename}:${e.lineno}\n\n${e.error?.stack || ''}`;
+    import React from "react";
+    import { createRoot } from "react-dom/client";
+
+    const errorDisplay = document.getElementById("error-display");
+
+    function showError(error) {
+      errorDisplay.style.display = "block";
+      errorDisplay.textContent =
+        "Erro ao iniciar o aplicativo:\n\n" +
+        (error?.stack || error?.message || String(error));
+    }
+
+    window.addEventListener("error", (event) => {
+      showError(event.error || new Error(event.message));
     });
 
-    import React from 'react';
-    import { createRoot } from 'react-dom/client';
+    window.addEventListener("unhandledrejection", (event) => {
+      showError(event.reason || new Error("Falha assíncrona desconhecida."));
+    });
 
-    // Babel transform inline
-    const jsxCode = await fetch('./agro-gp-pecuaria.jsx').then(r => r.text());
+    async function iniciarAplicativo() {
+      if (!window.Babel) {
+        throw new Error("O compilador Babel não foi carregado.");
+      }
 
-    const transformed = Babel.transform(jsxCode, {
-      presets: ['react'],
-      plugins: [],
-    }).code;
+      const resposta = await fetch("./agro-gp-pecuaria.jsx", { cache: "no-store" });
 
-    const blob = new Blob([transformed], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    const mod = await import(url);
-    const App = mod.default;
+      if (!resposta.ok) {
+        throw new Error(
+          `Não foi possível carregar agro-gp-pecuaria.jsx. HTTP ${resposta.status}. ` +
+          "Confirme se o arquivo está na mesma pasta do index.html."
+        );
+      }
 
-    createRoot(document.getElementById('root')).render(React.createElement(App));
+      const jsxCode = await resposta.text();
+
+      const transformed = Babel.transform(jsxCode, {
+        filename: "agro-gp-pecuaria.jsx",
+        presets: [["react", { runtime: "automatic" }]],
+        sourceType: "module"
+      }).code;
+
+      const blob = new Blob(
+        [transformed + "\n//# sourceURL=agro-gp-pecuaria.compilado.js"],
+        { type: "text/javascript" }
+      );
+
+      const moduleUrl = URL.createObjectURL(blob);
+
+      try {
+        const modulo = await import(moduleUrl);
+
+        if (!modulo.default) {
+          throw new Error(
+            "O arquivo agro-gp-pecuaria.jsx não exporta um componente padrão. " +
+            "Confirme se ele termina com: export default function App() { ... }"
+          );
+        }
+
+        createRoot(document.getElementById("root")).render(
+          React.createElement(modulo.default)
+        );
+      } finally {
+        URL.revokeObjectURL(moduleUrl);
+      }
+    }
+
+    iniciarAplicativo().catch(showError);
   </script>
-
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </body>
 </html>
