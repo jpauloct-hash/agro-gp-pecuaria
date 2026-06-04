@@ -1,70 +1,1027 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agro GP Pecuária — Simulador de Confinamento</title>
-  <meta name="description" content="Simulador educativo de confinamento bovino. Compra boi magro, alimenta, vende gordo. Entenda o triângulo de risco da pecuária." />
-
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0a0c07; font-family: sans-serif; }
-    #root { min-height: 100vh; }
-    #error-display {
-      display: none;
-      background: #1a0505;
-      border: 1px solid #c44536;
-      border-radius: 8px;
-      padding: 16px;
-      margin: 16px;
-      font-family: monospace;
-      font-size: 13px;
-      color: #e88;
-      white-space: pre-wrap;
-    }
-  </style>
-
-  <script type="importmap">
-  {
-    "imports": {
-      "react": "https://esm.sh/react@18.3.1",
-      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-      "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
-    }
-  }
-  </script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Agro GP Pecuária — Simulador de Confinamento</title>
+<meta name="description" content="Simulador educativo de gestão de confinamento bovino: compra de reposição, engorda, hedge, fluxo de caixa e ROE vs Selic." />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { background:#0a0c07; }
+  #root { min-height:100vh; }
+  #err { display:none; white-space:pre-wrap; color:#ffb3a7; background:#1a0505; border:1px solid #c44536; border-radius:8px; padding:16px; margin:16px; font-family:monospace; font-size:12px; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
-  <div id="root"></div>
-  <div id="error-display"></div>
+<div id="root"></div>
+<pre id="err"></pre>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+try {
 
-  <script type="module">
-    window.addEventListener('error', (e) => {
-      const el = document.getElementById('error-display');
-      el.style.display = 'block';
-      el.textContent = `Erro: ${e.message}\n${e.filename}:${e.lineno}\n\n${e.error?.stack || ''}`;
+// ════════════════════════════════════════════════════════════════════════════════
+// AGRO GP PECUÁRIA v2 — MOTOR ECONÔMICO-FINANCEIRO
+// Selic remunera caixa + custo de oportunidade · financiamento · fluxo de caixa real
+// categorias de reposição · hedge · venda decidida pelo usuário
+// ════════════════════════════════════════════════════════════════════════════════
+
+const CAPITAL_INICIAL = 9_000_000;
+const CAPACIDADE_CURRAL = 2500;        // cabeças
+const ARROBA_KG = 15;                  // 1 @ = 15 kg de carcaça
+const SELIC_AA = 0.145;                // 14,5% a.a. — remunera caixa e é custo de oportunidade
+const FINANC_AA = 0.125;               // 12,5% a.a. — custeio pecuário subsidiado
+const RESERVA_CAIXA = 0.10;            // mantém 10% do caixa como reserva
+
+const MESES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+
+// ── Taxa equivalente para um período em dias ────────────────────────────────────
+function taxaPeriodo(taxaAA, dias) { return Math.pow(1 + taxaAA, dias / 365) - 1; }
+function taxaMes(taxaAA) { return Math.pow(1 + taxaAA, 1 / 12) - 1; }
+
+// ── SAZONALIDADE (índices mensais, base ~1.0) — calibrado CEPEA 2024-2026 ─────────
+const SAZONAL = {
+  gordo: [0.97,0.96,0.95,0.94,0.93,0.97,1.02,1.07,1.08,1.04,1.00,0.98],
+  //      Jan  Fev  Mar  Abr  Mai  Jun  Jul  Ago  Set  Out  Nov  Dez
+  milho: [1.06,1.08,1.10,1.07,1.00,0.92,0.88,0.90,0.94,0.98,1.02,1.05],
+  magro: [1.00,1.01,1.00,0.97,0.95,0.96,0.99,1.03,1.05,1.04,1.02,1.01],
+};
+function estacaoDoMes(m) {
+  if ([10,11,0,1,2].includes(m)) return { nome:"Águas", emoji:"🌧️", cor:"#6B9BD4" };
+  if ([3,4,5].includes(m))       return { nome:"Safra",  emoji:"🐂", cor:"#8FB36B" };
+  return { nome:"Entressafra", emoji:"☀️", cor:"#C97B3F" }; // 6,7,8,9
+}
+
+// ── REGIÕES ───────────────────────────────────────────────────────────────────────
+const REGIOES = {
+  MT: { nome:"Mato Grosso", emoji:"🌾", gordo_base:337, milho_base:48, agio_reg:0.00,
+        desc:"Milho barato (produz em casa), boi gordo mais descontado (longe do abate)." },
+  GO: { nome:"Goiás",       emoji:"🐄", gordo_base:342, milho_base:54, agio_reg:0.02,
+        desc:"Equilíbrio: bom acesso a frigorífico e custo de grão médio." },
+  SP: { nome:"São Paulo",   emoji:"🏭", gordo_base:350, milho_base:68, agio_reg:0.05,
+        desc:"Boi gordo mais valorizado (perto do consumo), mas milho e reposição caros." },
+};
+
+// ── CATEGORIAS DE REPOSIÇÃO ────────────────────────────────────────────────────────
+const CATEGORIAS = {
+  bezerro: { nome:"Bezerro", emoji:"🐮", peso_kg:240, rend_entrada:0.50, dias:140, agio_cat:0.18,
+             desc:"Leve e barato no total, mas ágio alto por @. Cocho longo, muitas @ a produzir — joga na eficiência." },
+  garrote: { nome:"Garrote", emoji:"🐂", peso_kg:300, rend_entrada:0.52, dias:110, agio_cat:0.10,
+             desc:"Meio-termo equilibrado entre capital, ágio e tempo de cocho." },
+  boiMagro:{ nome:"Boi magro", emoji:"🐃", peso_kg:390, rend_entrada:0.54, dias:85, agio_cat:0.04,
+             desc:"Pesado, gira rápido, melhor relação de troca — mas exige mais capital por cabeça e agrega poucas @." },
+};
+
+// ── GENÉTICA ────────────────────────────────────────────────────────────────────────
+const GENETICAS = {
+  comum:   { nome:"Comum",   emoji:"🐄", custo_cab:0,   gmd_mult:1.00, rend_bonus:0.00, valor_bonus:1.00,
+             desc:"Nelore padrão. Sem custo extra, desempenho de referência." },
+  cruzado: { nome:"Cruzado F1", emoji:"🐂", custo_cab:180, gmd_mult:1.12, rend_bonus:0.02, valor_bonus:1.035,
+             desc:"Cruzamento industrial: ganha mais rápido, rende melhor, carcaça premiada." },
+  premium: { nome:"Premium", emoji:"⭐", custo_cab:340, gmd_mult:1.20, rend_bonus:0.04, valor_bonus:1.08,
+             desc:"Genética superior: máximo GMD e rendimento, bonificação de carcaça — caro na entrada." },
+};
+
+// ── ESTRUTURA ────────────────────────────────────────────────────────────────────────
+const ESTRUTURAS = {
+  simples:      { nome:"Simples",     emoji:"🏚️", fixo_mes:30_000, gmd_mult:1.00, mort_base:0.012,
+                  desc:"Curral básico. Baixo custo fixo, mas perde desempenho e tem mais perdas." },
+  profissional: { nome:"Profissional",emoji:"🏠", fixo_mes:45_000, gmd_mult:1.05, mort_base:0.008,
+                  desc:"Cocho e manejo profissionais. Melhor conversão e menos mortalidade." },
+  hightech:     { nome:"High-tech",   emoji:"🏭", fixo_mes:70_000, gmd_mult:1.10, mort_base:0.005,
+                  desc:"Confinamento de ponta: sombreamento, cocho automatizado, sanidade rígida." },
+};
+
+// ── DIETA ─────────────────────────────────────────────────────────────────────────────
+const DIETAS = {
+  volumoso: { nome:"Volumoso+", emoji:"🌿", custo_dia:11, gmd_base:1.20, milho_dep:0.45, conv:7.0,
+              desc:"Mais capim/silagem, pouco grão. Barato por dia, ganho lento." },
+  silagem:  { nome:"Silagem",   emoji:"🌽", custo_dia:14, gmd_base:1.45, milho_dep:0.65, conv:6.2,
+              desc:"Silagem de milho + concentrado. Equilíbrio custo × ganho." },
+  altoGrao: { nome:"Alto grão", emoji:"🌾", custo_dia:18, gmd_base:1.65, milho_dep:0.85, conv:5.6,
+              desc:"Muito grão. Ganho rápido e ótima conversão, mas caro e sensível ao milho." },
+  premium:  { nome:"Premium",   emoji:"💎", custo_dia:22, gmd_base:1.75, milho_dep:0.80, conv:5.2,
+              desc:"Dieta de máximo desempenho com aditivos. Custo alto, conversão excelente." },
+};
+
+// ── PONTO DE ABATE ────────────────────────────────────────────────────────────────────
+const SAIDAS = {
+  antecipado: { nome:"Antecipado", emoji:"⚡", delta_dias:-15, desc:"Tira mais cedo: menos @, libera o curral antes." },
+  alvo:       { nome:"No ponto",   emoji:"🎯", delta_dias:0,   desc:"Acabamento ideal de carcaça." },
+  tardio:     { nome:"Tardio",     emoji:"⏳", delta_dias:20,  desc:"Segura mais: mais @, porém eficiência decai (rendimento marginal)." },
+};
+
+// ── HEDGE ─────────────────────────────────────────────────────────────────────────────
+const HEDGES = {
+  nenhum:  { nome:"Sem trava", pct:0.00, custo_pct:0.000, desc:"Vende tudo no spot do abate. Exposto ao mercado." },
+  parcial: { nome:"Trava 50%", pct:0.50, custo_pct:0.006, desc:"Trava metade no futuro (B3/BGI). Protege parte, mantém parte do upside." },
+  total:   { nome:"Trava 100%",pct:1.00, custo_pct:0.011, desc:"Trava toda a venda no futuro. Resultado previsível." },
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// PREÇOS
+// ════════════════════════════════════════════════════════════════════════════════
+function precoGordoAt(regiao, mes) { return REGIOES[regiao].gordo_base * SAZONAL.gordo[mes]; }
+function precoMilhoSc(regiao, mes) { return REGIOES[regiao].milho_base * SAZONAL.milho[mes]; }
+
+// preço do magro POR @ de CARCAÇA de entrada (gordo carcaça + ágio de categoria/região/genética)
+// A reposição é cotada com prêmio sobre a @ do gordo: bezerro tem ágio alto, boi magro baixo.
+function precoMagroAt(regiao, categoria, genetica, mes) {
+  const g = precoGordoAt(regiao, mes);
+  const agio = CATEGORIAS[categoria].agio_cat + REGIOES[regiao].agio_reg;
+  const base = g * (1 + agio) * SAZONAL.magro[mes] / SAZONAL.gordo[mes];
+  return base * GENETICAS[genetica].valor_bonus;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// MONTAGEM DO LOTE
+// ════════════════════════════════════════════════════════════════════════════════
+function montarLote(cfg) {
+  const { caixa, regiao, categoria, genetica, mes, financ_pct } = cfg;
+  const cat = CATEGORIAS[categoria];
+  const atEntrada = (cat.peso_kg * cat.rend_entrada) / ARROBA_KG;   // @ de carcaça compradas no magro
+  const magroAt = precoMagroAt(regiao, categoria, genetica, mes);    // R$/@ carcaça do magro
+  const custoMagroCab = atEntrada * magroAt + GENETICAS[genetica].custo_cab;
+
+  const caixaInvestivel = caixa * (1 - RESERVA_CAIXA);
+  const propriaCab = custoMagroCab * (1 - financ_pct);
+  const porCaixa = propriaCab > 0 ? Math.floor(caixaInvestivel / propriaCab) : CAPACIDADE_CURRAL;
+  const lote = Math.max(0, Math.min(CAPACIDADE_CURRAL, porCaixa));
+
+  return { lote, custoMagroCab, magroAt, atEntrada, pesoVivoEntrada: cat.peso_kg,
+           financiadoCab: custoMagroCab * financ_pct, propriaCab };
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SIMULAÇÃO DE UM GIRO (fluxo de caixa mês a mês, DRE, cockpit)
+// cfg.precoVendaAt (opcional) = preço de venda decidido pelo usuário no abate
+// ════════════════════════════════════════════════════════════════════════════════
+function simularGiro(cfg) {
+  const { caixa, regiao, categoria, genetica, dieta, estrutura, mes, financ_pct, saida, hedge } = cfg;
+  const segurarMeses = cfg.segurarMeses || 0; // postergar o abate (segurar apostando em alta)
+  const cat = CATEGORIAS[categoria], gen = GENETICAS[genetica], est = ESTRUTURAS[estrutura];
+  const die = DIETAS[dieta], sai = SAIDAS[saida], hed = HEDGES[hedge];
+
+  const ml = montarLote(cfg);
+  const lote = ml.lote;
+
+  const diasBase = Math.max(40, cat.dias + sai.delta_dias);
+  const diasSegurar = 30 * segurarMeses;
+  const dias = diasBase + diasSegurar;
+  const nMeses = Math.max(1, Math.round(dias / 30));
+
+  // desempenho (dias segurados rendem só 45% — boi já terminado engorda pouco)
+  const gmd = die.gmd_base * gen.gmd_mult * est.gmd_mult;
+  const diasEfetivos = (sai.delta_dias > 0 ? cat.dias + sai.delta_dias * 0.55 : diasBase) + diasSegurar * 0.45;
+  const ganhoVivo = gmd * diasEfetivos;
+  const pesoVivoSaida = cat.peso_kg + ganhoVivo;
+  const rendSaida = cat.rend_entrada + gen.rend_bonus + 0.02;
+  const atEntrada = (cat.peso_kg * cat.rend_entrada) / ARROBA_KG;
+  const atSaida = (pesoVivoSaida * rendSaida) / ARROBA_KG;
+  const atProduzidas = Math.max(0.1, atSaida - atEntrada);
+  const conv = die.conv;
+
+  // mortalidade
+  const mort = est.mort_base * (dias / 100);
+  const loteVivo = lote * (1 - mort);
+
+  // custos por cabeça
+  const custoMagroCab = ml.custoMagroCab;
+  const fatorMilho = precoMilhoSc(regiao, mes) / REGIOES[regiao].milho_base;
+  const custoRacaoCab = die.custo_dia * dias * (fatorMilho * die.milho_dep + (1 - die.milho_dep));
+  const custoSanidadeCab = 18 * (dias / 30);
+  const custoFixoCab = (est.fixo_mes * nMeses) / Math.max(lote, 1);
+
+  // financeiro
+  const tFin = taxaPeriodo(FINANC_AA, dias);
+  const jurosFinancCab = ml.financiadoCab * tFin;
+  const tOport = taxaPeriodo(SELIC_AA, dias);
+  const custoOportCab = ml.propriaCab * tOport; // referência (NÃO entra no lucro de caixa)
+
+  const custoOpCab = custoMagroCab + custoRacaoCab + custoSanidadeCab + custoFixoCab + jurosFinancCab;
+  const custoEconCab = custoOpCab + custoOportCab;
+
+  // preços de venda
+  const mesVenda = (mes + nMeses) % 12;
+  const gordoSpotVenda = precoGordoAt(regiao, mesVenda) * gen.valor_bonus;
+  const gordoTravado = precoGordoAt(regiao, mes) * gen.valor_bonus;
+  const precoVendaAt = cfg.precoVendaAt != null ? cfg.precoVendaAt : gordoSpotVenda;
+  const precoEfetivoAt = hed.pct * gordoTravado + (1 - hed.pct) * precoVendaAt - hed.custo_pct * gordoTravado;
+
+  // resultado por cabeça
+  const receitaCab = atSaida * precoEfetivoAt;
+  const margemOpCab = receitaCab - custoOpCab;
+  const margemEconCab = receitaCab - custoEconCab;
+
+  // cockpit
+  const custoAtProduzida = (custoRacaoCab + custoSanidadeCab + custoFixoCab + jurosFinancCab) / atProduzidas;
+  const precoEquilibrio = custoOpCab / atSaida;
+  const diaria = (custoRacaoCab + custoSanidadeCab) / dias;
+  const relacaoTroca = custoMagroCab / gordoSpotVenda;
+  const agioReposicao = (ml.magroAt - precoGordoAt(regiao, mes)) / precoGordoAt(regiao, mes);
+
+  // fluxo de caixa mês a mês
+  const fluxo = [];
+  let saldo = caixa;
+  let selicGanho = 0;
+  const saidaCompra = ml.propriaCab * lote;
+  saldo -= saidaCompra;
+  fluxo.push({ mes, rotulo:"Compra do magro", entrada:0, saida:saidaCompra, saldo });
+  for (let i = 1; i <= nMeses; i++) {
+    const mm = (mes + i) % 12;
+    const racaoMes = (custoRacaoCab * lote) / nMeses;
+    const fixoMes = est.fixo_mes;
+    const sanMes = (custoSanidadeCab * lote) / nMeses;
+    const rendimentoSelic = saldo > 0 ? saldo * taxaMes(SELIC_AA) : 0;
+    selicGanho += rendimentoSelic;
+    const ultimoMes = i === nMeses;
+    let entradaVenda = 0, saidaFinanc = 0;
+    if (ultimoMes) {
+      entradaVenda = receitaCab * loteVivo;
+      saidaFinanc = (ml.financiadoCab + jurosFinancCab) * lote;
+    }
+    saldo += rendimentoSelic + entradaVenda - racaoMes - fixoMes - sanMes - saidaFinanc;
+    fluxo.push({ mes:mm, rotulo: ultimoMes ? "Engorda + VENDA" : "Engorda",
+                 entrada: rendimentoSelic + entradaVenda,
+                 saida: racaoMes + fixoMes + sanMes + saidaFinanc, saldo });
+  }
+
+  // resultado operacional do giro (custos na entrada toda; receita nos sobreviventes) — bate com o caixa
+  const resultadoOperacional = receitaCab * loteVivo - custoOpCab * lote;
+  const resultadoLote = resultadoOperacional + selicGanho; // = caixaFinal - caixa (exato)
+  const caixaFinal = saldo;
+  const margemCab = resultadoOperacional / Math.max(lote, 1); // margem operacional por cabeça alojada
+
+  return {
+    mes, mesVenda, nMeses, dias, lote, loteVivo, mort,
+    pesoVivoEntrada: cat.peso_kg, pesoVivoSaida, atEntrada, atSaida, atProduzidas, gmd, conv,
+    custoMagroCab, custoRacaoCab, custoSanidadeCab, custoFixoCab, jurosFinancCab, custoOportCab,
+    custoOpCab, custoEconCab,
+    magroAt: ml.magroAt, gordoSpotVenda, gordoTravado, precoEfetivoAt,
+    financiadoCab: ml.financiadoCab, propriaCab: ml.propriaCab,
+    receitaCab, margemOpCab, margemEconCab, margemCab, resultadoOperacional, selicGanho, resultadoLote, caixaFinal, saidaCompra,
+    custoAtProduzida, precoEquilibrio, diaria, relacaoTroca, agioReposicao,
+    fluxo,
+  };
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════════
+// DESIGN
+// ════════════════════════════════════════════════════════════════════════════════
+const C = { bg:"#0a0c07", surf:"#11140c", surf2:"#171b10", bord:"#242a1a", bord2:"#323923",
+  acc:"#D4A574", red:"#C44536", grn:"#8FB36B", orn:"#C97B3F", mut:"#5a6048", txt:"#ece8dc", dim:"#9a9a86", blue:"#6B9BD4" };
+const SERIF = "'Fraunces',Georgia,serif";
+const MONO = "'JetBrains Mono',ui-monospace,monospace";
+const SANS = "'Geist',system-ui,sans-serif";
+const FONT_CSS = [
+  "@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@1,9..144,400;1,9..144,600&family=JetBrains+Mono:wght@400;500;700&family=Geist:wght@400;500;600;700&display=swap');",
+  "*{box-sizing:border-box}body{margin:0}",
+  "::-webkit-scrollbar{width:4px;height:4px}::-webkit-scrollbar-thumb{background:#2a2e20;border-radius:2px}",
+  "@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}",
+  "@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}",
+].join("");
+
+const fmt = (n,d=0)=>Number(n).toLocaleString("pt-BR",{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtR = (n)=>"R$ "+fmt(Math.round(n));
+const fmtRk = (n)=>{ const v=n/1000; return "R$ "+fmt(Math.round(v))+"k"; };
+const fmtRM = (n)=>"R$ "+fmt(n/1e6,2)+"M";
+const fmtP = (n)=>(n*100).toFixed(1).replace(".",",")+"%";
+const fmtAt = (n)=>fmt(n,1)+"@";
+
+// ════════════════════════════════════════════════════════════════════════════════
+// PEÇAS BÁSICAS
+// ════════════════════════════════════════════════════════════════════════════════
+function InfoBtn({ dica, onOpen }) {
+  if (!DICAS[dica]) return null;
+  return <button onClick={(e)=>{e.stopPropagation();onOpen(dica);}} aria-label="info" style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:16,height:16,minWidth:16,borderRadius:"50%",border:`1px solid ${C.acc}77`,background:"transparent",color:C.acc,fontSize:9.5,fontWeight:700,lineHeight:1,cursor:"pointer",fontFamily:SANS,marginLeft:5,padding:0,verticalAlign:"middle",flexShrink:0}}>i</button>;
+}
+
+function Tip({ dica, onClose }) {
+  const d = DICAS[dica]; if(!d) return null;
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.65)",zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fbfaf6",color:"#1a1a1a",width:"100%",maxWidth:520,borderRadius:"22px 22px 0 0",maxHeight:"86vh",display:"flex",flexDirection:"column",animation:"slideUp .25s ease-out"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"24px 24px 16px",borderBottom:"1px solid #e8e4da"}}>
+          <strong style={{fontSize:21,fontFamily:SERIF,fontStyle:"italic",fontWeight:600,lineHeight:1.2,paddingRight:12}}>{d.titulo}</strong>
+          <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:26,color:"#aaa",lineHeight:1,padding:0,marginTop:2}}>×</button>
+        </div>
+        <div style={{padding:"20px 24px",overflowY:"auto",fontFamily:MONO,fontSize:13,lineHeight:1.7}}>
+          {d.secoes.map((s,i)=>(<p key={i} style={{margin:"0 0 16px"}}><strong style={{color:C.orn,fontWeight:700}}>{s.label}</strong><span style={{color:"#3a3a32"}}> — {s.texto}</span></p>))}
+        </div>
+        <div style={{padding:"14px 24px 24px",borderTop:"1px solid #e8e4da"}}>
+          <button onClick={onClose} style={{width:"100%",padding:15,background:"#15170f",color:"#fbfaf6",border:"none",borderRadius:12,fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:SANS}}>Entendi</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// COCKPIT — 9 indicadores em 3 blocos, fixo no topo de toda tela
+// ════════════════════════════════════════════════════════════════════════════════
+function CockpitCell({ label, value, cor, dica, onTip }) {
+  return (
+    <div style={{flex:1,minWidth:0,padding:"0 9px"}}>
+      <div style={{fontSize:8.5,color:C.dim,fontFamily:SANS,letterSpacing:".03em",textTransform:"uppercase",lineHeight:1.15,marginBottom:3,display:"flex",alignItems:"center",height:20}}>{label}{dica&&<InfoBtn dica={dica} onOpen={onTip}/>}</div>
+      <div style={{fontSize:14.5,fontWeight:700,fontFamily:MONO,color:cor||C.txt,lineHeight:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{value}</div>
+    </div>
+  );
+}
+function CockpitBlock({ titulo, cells, onTip, prioridade }) {
+  return (
+    <div style={{padding:"9px 4px",borderTop:`1px solid ${C.bord}`}}>
+      <div style={{fontSize:8,color:prioridade===1?C.acc:C.mut,fontFamily:SANS,letterSpacing:".1em",textTransform:"uppercase",padding:"0 9px",marginBottom:6,fontWeight:600}}>{titulo}</div>
+      <div style={{display:"flex"}}>{cells.map((c,i)=><CockpitCell key={i} {...c} onTip={onTip}/>)}</div>
+    </div>
+  );
+}
+// computa os 9 indicadores a partir de um resultado de giro (res) + capital de referência
+function cockpit(res, caixaRef, onTip) {
+  if (!res) return null;
+  const roe = res.resultadoLote / Math.max(res.saidaCompra, 1);  // retorno sobre capital próprio investido
+  const selicCiclo = taxaPeriodo(SELIC_AA, res.dias);
+  const roeCor = res.resultadoLote<0 ? C.red : roe>selicCiclo ? C.grn : C.orn;
+  const gordoHoje = precoGordoAt ? null : null;
+  return (
+    <div style={{background:C.surf,borderRadius:0}}>
+      <CockpitBlock titulo="▸ Resultado / Gestão" prioridade={1} onTip={onTip} cells={[
+        { label:"Preço equilíbrio", value:fmtR(res.precoEquilibrio)+"/@", cor:C.acc, dica:"precoEquilibrio" },
+        { label:"Margem / cabeça", value:(res.margemCab>=0?"+":"")+fmtR(res.margemCab), cor:res.margemCab>=0?C.grn:C.red, dica:"margemCab" },
+        { label:"ROE vs Selic", value:fmtP(roe), cor:roeCor, dica:"roeSelic" },
+      ]}/>
+      <CockpitBlock titulo="▸ Comercial" onTip={onTip} cells={[
+        { label:"Relação troca", value:fmtAt(res.relacaoTroca), cor:res.relacaoTroca<=19?C.grn:C.orn, dica:"relacaoTroca" },
+        { label:"Ágio reposição", value:(res.agioReposicao>=0?"+":"")+fmtP(res.agioReposicao), cor:res.agioReposicao>0.15?C.red:C.txt, dica:"agioReposicao" },
+        { label:"Gordo venda", value:fmtR(res.gordoSpotVenda)+"/@", cor:C.txt, dica:"gordoVenda" },
+      ]}/>
+      <CockpitBlock titulo="▸ Operacional" onTip={onTip} cells={[
+        { label:"Diária", value:fmtR(res.diaria)+"/d", cor:C.txt, dica:"diaria" },
+        { label:"Custo @ prod.", value:fmtR(res.custoAtProduzida)+"/@", cor:C.txt, dica:"custoAtProd" },
+        { label:"GMD / Conv.", value:fmt(res.gmd,2)+" · "+fmt(res.conv,1), cor:C.txt, dica:"gmdConv" },
+      ]}/>
+    </div>
+  );
+}
+
+// Barra de etapas
+const ETAPAS = ["Setup","Compra","Engorda","Venda","Balanço"];
+function StageBar({ activeIdx, sub }) {
+  const frac = (Math.max(0,activeIdx) + (sub??0)) / ETAPAS.length;
+  return (
+    <div style={{padding:"0 16px 10px"}}>
+      <div style={{display:"flex",gap:13,overflowX:"auto",paddingBottom:8}}>
+        {ETAPAS.map((s,i)=>(<span key={s} style={{fontSize:10.5,fontFamily:SANS,fontWeight:i===activeIdx?700:500,letterSpacing:".07em",textTransform:"uppercase",color:i===activeIdx?C.acc:i<activeIdx?C.dim:C.mut,whiteSpace:"nowrap"}}>{s}</span>))}
+      </div>
+      <div style={{height:2,background:C.bord,borderRadius:2,overflow:"hidden"}}><div style={{width:`${Math.max(4,frac*100)}%`,height:"100%",background:C.acc,transition:"width .3s"}}/></div>
+    </div>
+  );
+}
+
+// Calendário sazonal
+function Calendario({ mesAtual, ocupados, onTip, mini }) {
+  return (
+    <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:14,padding:mini?"12px 14px":"15px"}}>
+      {!mini && <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".07em",textTransform:"uppercase",marginBottom:10,display:"flex",alignItems:"center"}}>Calendário · preços por estação<InfoBtn dica="sazonalidade" onOpen={onTip}/></div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(12,1fr)",gap:3}}>
+        {MESES.map((mn,i)=>{
+          const est=estacaoDoMes(i), isA=i===mesAtual, isO=ocupados&&ocupados.includes(i);
+          return (<div key={i} style={{textAlign:"center"}}>
+            <div style={{height:4,background:est.cor,opacity:isA?1:.3,borderRadius:2,marginBottom:4}}/>
+            <div style={{fontSize:9,fontFamily:MONO,padding:"4px 0",borderRadius:5,background:isA?C.acc:isO?C.acc+"22":"transparent",color:isA?"#15170f":isO?C.acc:C.dim,fontWeight:isA?700:400,border:isO&&!isA?`1px solid ${C.acc}44`:"1px solid transparent"}}>{mn}</div>
+          </div>);
+        })}
+      </div>
+      {!mini && <div style={{display:"flex",gap:14,marginTop:10,justifyContent:"center",flexWrap:"wrap"}}>
+        {[{n:"Águas",c:"#6B9BD4"},{n:"Safra",c:"#8FB36B"},{n:"Entressafra (gordo no pico)",c:"#C97B3F"}].map(x=>(<span key={x.n} style={{fontSize:9,color:C.dim,fontFamily:SANS,display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,background:x.c,borderRadius:2}}/>{x.n}</span>))}
+      </div>}
+    </div>
+  );
+}
+
+// Card de previsão de estação
+function Forecast({ mes, onTip }) {
+  const e = estacaoDoMes(mes);
+  const txt = { "Águas":"Pasto sobrando, muito boi de capim no mercado. Gordo tende a cair; milho ainda do ciclo velho (caro).",
+    "Safra":"Safra do boi: oferta alta pressiona o gordo. Reposição mais barata e milho começando a colher.",
+    "Entressafra":"Seca: falta boi terminado, gordo no pico do ano. Milho safrinha recém-colhido, o mais barato." }[e.nome];
+  return (
+    <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:14,padding:"13px 15px",display:"flex",gap:11}}>
+      <div style={{width:9,height:9,borderRadius:"50%",background:e.cor,marginTop:5,flexShrink:0}}/>
+      <div style={{flex:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:3,flexWrap:"wrap"}}>
+          <span style={{fontSize:9.5,color:C.dim,fontFamily:SANS,letterSpacing:".07em",textTransform:"uppercase"}}>Estação</span>
+          <span style={{fontSize:14,color:e.cor,fontFamily:SERIF,fontStyle:"italic",fontWeight:600}}>{e.emoji} {e.nome}</span>
+          <InfoBtn dica="sazonalidade" onOpen={onTip}/>
+        </div>
+        <div style={{fontSize:11.5,color:C.dim,fontFamily:SANS,lineHeight:1.5}}>{txt}</div>
+      </div>
+    </div>
+  );
+}
+
+function DecisionTitle({ n, total, title, dica, desc, onTip }) {
+  return (
+    <div>
+      <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".1em",textTransform:"uppercase",marginBottom:6}}>Decisão {n} de {total}</div>
+      <h2 style={{margin:"0 0 8px",fontSize:27,fontFamily:SERIF,fontStyle:"italic",fontWeight:600,color:C.txt,lineHeight:1.1,display:"flex",alignItems:"center"}}>{title}{dica&&<InfoBtn dica={dica} onOpen={onTip}/>}</h2>
+      {desc&&<p style={{margin:0,fontSize:13.5,color:C.dim,fontFamily:SANS,lineHeight:1.55}}>{desc}</p>}
+    </div>
+  );
+}
+
+function OptionCard({ title, right, rightSub, desc, selected, onClick, dica, onTip, disabled }) {
+  return (
+    <div onClick={disabled?undefined:onClick} style={{position:"relative",border:`1.5px solid ${selected?C.acc:C.bord}`,borderRadius:15,padding:"16px 17px",cursor:disabled?"not-allowed":"pointer",background:selected?"rgba(212,165,116,.07)":C.surf,opacity:disabled?.45:1,transition:"border-color .15s, background .15s"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,marginBottom:desc?6:0}}>
+        <span style={{fontSize:19,fontFamily:SERIF,fontWeight:600,color:selected?C.acc:C.txt,display:"flex",alignItems:"center",lineHeight:1.1}}>{title}{dica&&<InfoBtn dica={dica} onOpen={onTip}/>}</span>
+        {right&&<span style={{textAlign:"right",flexShrink:0}}><span style={{fontSize:12.5,fontFamily:MONO,color:selected?C.acc:C.dim,fontWeight:500}}>{right}</span>{rightSub&&<span style={{display:"block",fontSize:9.5,fontFamily:MONO,color:C.mut}}>{rightSub}</span>}</span>}
+      </div>
+      {desc&&<p style={{margin:0,fontSize:12,color:C.dim,fontFamily:SANS,lineHeight:1.5}}>{desc}</p>}
+    </div>
+  );
+}
+
+function PrimaryBtn({ onClick, label, disabled }) {
+  return <button onClick={onClick} disabled={disabled} style={{flex:1,padding:16,background:disabled?C.bord:C.acc,color:disabled?C.mut:"#15170f",border:"none",borderRadius:13,fontSize:15,fontWeight:700,cursor:disabled?"not-allowed":"pointer",fontFamily:SANS}}>{label}</button>;
+}
+function GhostBtn({ onClick, label }) {
+  return <button onClick={onClick} style={{padding:"16px 16px",background:"transparent",color:C.dim,border:`1px solid ${C.bord}`,borderRadius:13,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:SANS,whiteSpace:"nowrap"}}>{label}</button>;
+}
+
+function MetricMini({ label, value, cor, sub, dica, onTip }) {
+  return (
+    <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:12,padding:"11px 12px"}}>
+      <div style={{fontSize:9,color:C.dim,fontFamily:SANS,letterSpacing:".04em",textTransform:"uppercase",display:"flex",alignItems:"center",marginBottom:5,lineHeight:1.2}}>{label}{dica&&<InfoBtn dica={dica} onOpen={onTip}/>}</div>
+      <div style={{fontSize:15,fontWeight:700,fontFamily:MONO,color:cor||C.txt,lineHeight:1.1}}>{value}</div>
+      {sub&&<div style={{fontSize:9,color:C.mut,fontFamily:SANS,marginTop:3}}>{sub}</div>}
+    </div>
+  );
+}
+
+// Casca: topo (logo+caixa) + cockpit (opcional) + barra etapa + conteúdo + rodapé
+function Shell({ camp, res, showCockpit, activeIdx, sub, dateLine, onTip, children, footer }) {
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",color:C.txt,paddingBottom:130}}>
+      <div style={{position:"sticky",top:0,zIndex:50,background:"rgba(10,12,7,.94)",backdropFilter:"blur(10px)",borderBottom:`1px solid ${C.bord}`}}>
+        <div style={{maxWidth:540,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,padding:"11px 16px 9px"}}>
+            <span style={{fontSize:13,fontFamily:SERIF,fontStyle:"italic",fontWeight:600,color:C.acc}}>Agro GP</span>
+            <span style={{fontSize:12,color:C.mut,fontFamily:SANS}}>Pecuária</span>
+            {camp&&<span style={{marginLeft:"auto",textAlign:"right"}}><span style={{display:"block",fontSize:8,color:C.dim,fontFamily:SANS,letterSpacing:".06em",textTransform:"uppercase"}}>Caixa</span><span style={{fontSize:14,fontFamily:MONO,fontWeight:700,color:C.acc}}>{fmtRM(camp.caixa)}</span></span>}
+          </div>
+          {showCockpit && res && cockpit(res, camp?camp.caixa:CAPITAL_INICIAL, onTip)}
+          {activeIdx!=null && <StageBar activeIdx={activeIdx} sub={sub}/>}
+        </div>
+      </div>
+      <div style={{maxWidth:540,margin:"0 auto",padding:"16px 16px 0"}}>
+        {dateLine&&<div style={{fontSize:11.5,color:C.dim,fontFamily:MONO,letterSpacing:".04em",marginBottom:15,display:"flex",alignItems:"center",gap:7}}><span style={{color:C.acc}}>▦</span>{dateLine}</div>}
+        {children}
+      </div>
+      {footer&&<div style={{position:"fixed",bottom:0,left:0,right:0,background:"linear-gradient(transparent, rgba(10,12,7,.96) 28%)",padding:"22px 16px 18px"}}><div style={{maxWidth:540,margin:"0 auto",display:"flex",gap:9}}>{footer}</div></div>}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TELAS
+// ════════════════════════════════════════════════════════════════════════════════
+function Intro({ onStart, onTip }) {
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",color:C.txt}}>
+      <div style={{maxWidth:540,margin:"0 auto",padding:"48px 20px 40px"}}>
+        <div style={{fontSize:10.5,fontFamily:SANS,letterSpacing:".14em",textTransform:"uppercase",color:C.orn,marginBottom:12}}>Simulador de gestão · 12 meses</div>
+        <h1 style={{margin:"0 0 14px",fontSize:42,fontFamily:SERIF,fontStyle:"italic",fontWeight:600,lineHeight:1.05}}>Agro GP<br/><span style={{color:C.acc}}>Pecuária</span></h1>
+        <p style={{margin:"0 0 24px",fontSize:14.5,color:C.dim,fontFamily:SANS,lineHeight:1.6}}>
+          Você é o gestor de um confinamento por um ano. Capital de <strong style={{color:C.txt}}>R$ 9 milhões</strong>, curral para <strong style={{color:C.txt}}>2.500 cabeças</strong>. Compre reposição, engorde e venda — girando o capital de um lote ao próximo, sempre medido contra o custo de oportunidade (Selic 14,5%).
+        </p>
+        <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:17,marginBottom:13}}>
+          <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".07em",textTransform:"uppercase",marginBottom:10,display:"flex",alignItems:"center"}}>O cockpit do gestor<InfoBtn dica="cockpit" onOpen={onTip}/></div>
+          <p style={{margin:0,fontSize:13,color:C.txt,fontFamily:SANS,lineHeight:1.6}}>Em toda tela, os 9 indicadores que o confinador profissional acompanha no dia a dia ficam no topo, recalculando a cada decisão: preço de equilíbrio, margem/cabeça, ROE vs Selic, relação de troca, ágio, diária, custo da @ produzida e mais.</p>
+        </div>
+        <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:17,marginBottom:28}}>
+          <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".07em",textTransform:"uppercase",marginBottom:11,display:"flex",alignItems:"center"}}>As alavancas de gestor<InfoBtn dica="janela" onOpen={onTip}/></div>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            {[["🎯","Timing","comprar magro barato e vender gordo no pico (a janela)"],["💳","Financiamento","alavancar a 12,5% enquanto o caixa rende Selic 14,5%"],["🔒","Hedge","travar preço no futuro (B3/BGI) para proteger a margem"],["⏳","Venda","decidir a hora do abate — vender ou segurar"]].map(x=>(
+              <div key={x[1]} style={{display:"flex",gap:9,alignItems:"flex-start"}}><span style={{fontSize:16}}>{x[0]}</span><div><strong style={{fontSize:12.5,color:C.acc,fontFamily:SANS}}>{x[1]}</strong><span style={{fontSize:12,color:C.dim,fontFamily:SANS}}> — {x[2]}</span></div></div>
+            ))}
+          </div>
+        </div>
+        <button onClick={onStart} style={{width:"100%",padding:17,background:C.acc,color:"#15170f",border:"none",borderRadius:14,fontSize:15.5,fontWeight:700,cursor:"pointer",fontFamily:SANS}}>Assumir o confinamento →</button>
+        <p style={{textAlign:"center",marginTop:13,fontSize:11,color:C.mut,fontFamily:SANS}}>Calibrado com CEPEA · Scot · ICAP (2024–2026) · toque nos <span style={{color:C.acc}}>ⓘ</span></p>
+      </div>
+    </div>
+  );
+}
+
+function DecisionScreen({ camp, res, activeIdx, sub, dateLine, n, total, title, dica, desc, options, footer, onTip, topo }) {
+  return (
+    <Shell camp={camp} res={res} showCockpit={!!res} activeIdx={activeIdx} sub={sub} dateLine={dateLine} onTip={onTip} footer={footer}>
+      {topo}
+      <div style={{marginBottom:16}}><DecisionTitle n={n} total={total} title={title} dica={dica} desc={desc} onTip={onTip}/></div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>{options}</div>
+    </Shell>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// APP
+// ════════════════════════════════════════════════════════════════════════════════
+const CFG0 = { categoria:"garrote", genetica:"cruzado", dieta:"silagem", hedge:"nenhum", saida:"alvo", financ_pct:0 };
+
+function App() {
+  const [fase, setFase] = useState("intro");
+  const [tip, setTip] = useState(null);
+  const [camp, setCamp] = useState(null);
+  const [cfg, setCfg] = useState(CFG0);
+  const [step, setStep] = useState(0);
+  const [giro, setGiro] = useState(null);     // { res, passo }
+  const [segurar, setSegurar] = useState(0);
+  const setK = (k,v)=>setCfg(p=>({...p,[k]:v}));
+
+  const comecar = ()=>{ setCamp({ regiao:"GO", estrutura:"profissional", caixa:CAPITAL_INICIAL, mes:0, giros:[], mesesOciosos:0 }); setCfg(CFG0); setStep(0); setFase("setup"); };
+  const reiniciar = ()=>{ setCamp(null); setGiro(null); setStep(0); setSegurar(0); setCfg(CFG0); setFase("intro"); };
+
+  if (fase==="intro") return <Wrap tip={tip} setTip={setTip}><Intro onStart={comecar} onTip={setTip}/></Wrap>;
+  if (fase==="anual") return <Wrap tip={tip} setTip={setTip}><Anual camp={camp} onReiniciar={reiniciar} onTip={setTip}/></Wrap>;
+
+  const firstGiro = camp.giros.length===0;
+  const STEPS = firstGiro ? ["regiao","estrutura","mes","categoria","financiamento","genetica","dieta","hedge","abate","revisao"]
+                          : ["mes","categoria","financiamento","genetica","dieta","hedge","abate","revisao"];
+  const total = STEPS.length;
+  const m = camp.mes;
+  const baseCfg = { ...cfg, caixa:camp.caixa, regiao:camp.regiao, estrutura:camp.estrutura, mes:m };
+  const proj = (()=>{ try { const r = simularGiro(baseCfg); return r.lote>=20 ? r : simularGiro({...baseCfg, financ_pct:0}); } catch(e){ return null; } })();
+
+  const next = ()=>setStep(s=>s+1);
+  const back = ()=>setStep(s=>Math.max(0,s-1));
+  const aguardar = ()=>setCamp(c=>{ const f=ESTRUTURAS[c.estrutura].fixo_mes; const nm=c.mes+1; const selic=c.caixa*taxaMes(SELIC_AA); const nc={...c,caixa:c.caixa-f+selic,mesesOciosos:c.mesesOciosos+1}; if(nm>=12){ nc.mes=11; setTimeout(()=>setFase("anual"),0);} else nc.mes=nm; return nc; });
+  const iniciarGiro = ()=>{ const r=simularGiro(baseCfg); setGiro({ res:r, passo:0 }); setSegurar(0); setFase("giro"); };
+
+  // ── SETUP ──
+  if (fase==="setup") {
+    const key = STEPS[step];
+    const stepN = step+1;
+    const dateLine = `${MESES[m].toUpperCase()} · ${firstGiro?"montando o 1º lote":"lote nº "+(camp.giros.length+1)}`;
+    const cockRes = (key==="regiao"||key==="estrutura") ? null : proj;
+    const navBack = step>0 ? <GhostBtn onClick={back} label="←"/> : null;
+
+    if (key==="regiao") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={null} activeIdx={0} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Região" dica="regiao" onTip={setTip}
+      desc="Onde fica seu confinamento. Fixo para a campanha — cada praça é uma estratégia de preço de boi e de milho."
+      options={Object.entries(REGIOES).map(([k,rg])=>(<OptionCard key={k} title={rg.nome} right={`gordo R$${rg.gordo_base}`} rightSub={`milho R$${rg.milho_base}/sc`} desc={rg.desc} selected={camp.regiao===k} onClick={()=>setCamp(c=>({...c,regiao:k}))} dica={{MT:"regMT",GO:"regGO",SP:"regSP"}[k]} onTip={setTip}/>))}
+      footer={<PrimaryBtn onClick={next} label="Próximo →"/>}/></Wrap>;
+
+    if (key==="estrutura") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={null} activeIdx={0} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Estrutura" dica="estrutura" onTip={setTip}
+      desc="O confinamento que você opera. O custo fixo corre todo mês, com curral cheio ou vazio."
+      options={Object.entries(ESTRUTURAS).map(([k,e])=>(<OptionCard key={k} title={e.nome} right={`${fmtRk(e.fixo_mes)}/mês`} rightSub={`GMD ×${e.gmd_mult.toFixed(2)} · mort ${(e.mort_base*100).toFixed(1)}%`} desc={e.desc} selected={camp.estrutura===k} onClick={()=>setCamp(c=>({...c,estrutura:k}))} dica={{simples:"estSimples",profissional:"estProfissional",hightech:"estHightech"}[k]} onTip={setTip}/>))}
+      footer={<>{navBack}<PrimaryBtn onClick={next} label="Próximo →"/></>}/></Wrap>;
+
+    if (key==="mes") {
+      const cabe = true;
+      const topo = (<>
+        <div style={{marginBottom:13}}><Forecast mes={m} onTip={setTip}/></div>
+        <div style={{marginBottom:13}}><Calendario mesAtual={m} ocupados={[]} onTip={setTip}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}>
+          <MetricMini label="Gordo hoje" value={"R$"+Math.round(precoGordoAt(camp.regiao,m))} sub={SAZONAL.gordo[m]>1.02?"▲ caro":SAZONAL.gordo[m]<.98?"▼ barato":"– médio"} cor={SAZONAL.gordo[m]<.98?C.grn:SAZONAL.gordo[m]>1.02?C.red:C.txt} dica="gordoVenda" onTip={setTip}/>
+          <MetricMini label="Milho hoje" value={"R$"+Math.round(precoMilhoSc(camp.regiao,m))} sub={SAZONAL.milho[m]<.95?"▼ barato":SAZONAL.milho[m]>1.05?"▲ caro":"– médio"} cor={SAZONAL.milho[m]<.95?C.grn:SAZONAL.milho[m]>1.05?C.red:C.txt} dica="milho" onTip={setTip}/>
+          <MetricMini label="Estação" value={estacaoDoMes(m).nome} cor={estacaoDoMes(m).cor} dica="sazonalidade" onTip={setTip}/>
+        </div>
+      </>);
+      return <Wrap tip={tip} setTip={setTip}><Shell camp={camp} res={null} activeIdx={1} sub={stepN/total} dateLine={dateLine} onTip={setTip}
+        footer={<><GhostBtn onClick={aguardar} label={`Aguardar (−${fmtRk(ESTRUTURAS[camp.estrutura].fixo_mes)} +Selic)`}/><PrimaryBtn onClick={next} label="Comprar neste mês →"/></>}>
+        {topo}
+        <DecisionTitle n={stepN} total={total} title="Quando comprar" dica="janela" onTip={setTip} desc={`Você está em ${MESES[m]}, curral vazio. Comprar agora ou esperar a janela? Cada mês parado custa o fixo, mas o caixa rende Selic.`}/>
+      </Shell></Wrap>;
+    }
+
+    if (key==="categoria") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={cockRes} activeIdx={1} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Reposição" dica="categoria" onTip={setTip}
+      desc="Que animal comprar para engordar. Define capital por cabeça, tempo de cocho, ágio e relação de troca — o coração da decisão comercial."
+      options={Object.entries(CATEGORIAS).map(([k,cat])=>{ const pj=simularGiro({...baseCfg,categoria:k}); return (<OptionCard key={k} title={cat.nome} right={`magro ${fmtR(pj.custoMagroCab)}`} rightSub={`troca ${fmtAt(pj.relacaoTroca)} · ágio ${fmtP(pj.agioReposicao)}`} desc={cat.desc} selected={cfg.categoria===k} onClick={()=>setK("categoria",k)} dica={{bezerro:"catBezerro",garrote:"catGarrote",boiMagro:"catBoiMagro"}[k]} onTip={setTip}/>); })}
+      footer={<>{navBack}<PrimaryBtn onClick={next} label="Próximo →"/></>}/></Wrap>;
+
+    if (key==="financiamento") {
+      const opts=[{k:0,n:"À vista (0%)",d:"Compra só com capital próprio. Sem juros, mas imobiliza mais caixa."},{k:0.5,n:"Financiar 50%",d:"Metade no custeio a 12,5%aa. Libera caixa que rende Selic 14,5%."},{k:1.0,n:"Financiar 100%",d:"Compra toda no custeio. Máxima alavancagem — multiplica ROE, mas amplia o risco."}];
+      return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={cockRes} activeIdx={1} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Financiamento" dica="financiamento" onTip={setTip}
+        desc="Quanto do lote financiar no custeio pecuário (12,5%aa, abaixo da Selic). Financiar libera caixa próprio para render Selic e permite lote maior — é a alavancagem do gestor."
+        options={opts.map(o=>{ const pj=simularGiro({...baseCfg,financ_pct:o.k}); return (<OptionCard key={o.k} title={o.n} right={`lote ${fmt(pj.lote)} cab`} rightSub={o.k>0?`juros ${fmtR(pj.jurosFinancCab)}/cab`:"sem juros"} desc={o.d} selected={cfg.financ_pct===o.k} onClick={()=>setK("financ_pct",o.k)} onTip={setTip}/>); })}
+        footer={<>{navBack}<PrimaryBtn onClick={next} label="Próximo →"/></>}/></Wrap>;
+    }
+
+    if (key==="genetica") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={cockRes} activeIdx={1} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Genética" dica="genetica" onTip={setTip}
+      desc="A qualidade do animal. Genética melhor custa mais na reposição, mas ganha mais rápido, rende mais carcaça e bonifica o preço de venda."
+      options={Object.entries(GENETICAS).map(([k,g])=>{ const pj=simularGiro({...baseCfg,genetica:k}); return (<OptionCard key={k} title={g.nome} right={`equil. ${fmtR(pj.precoEquilibrio)}/@`} rightSub={g.custo_cab>0?`+${fmtR(g.custo_cab)}/cab`:"sem custo extra"} desc={g.desc} selected={cfg.genetica===k} onClick={()=>setK("genetica",k)} dica={{comum:"genComum",cruzado:"genCruzado",premium:"genPremium"}[k]} onTip={setTip}/>); })}
+      footer={<>{navBack}<PrimaryBtn onClick={next} label="Próximo →"/></>}/></Wrap>;
+
+    if (key==="dieta") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={cockRes} activeIdx={1} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Dieta" dica="dieta" onTip={setTip}
+      desc="O que vai no cocho. Mais grão acelera o ganho e melhora a conversão, mas custa mais por dia e depende do preço do milho."
+      options={Object.entries(DIETAS).map(([k,d])=>{ const pj=simularGiro({...baseCfg,dieta:k}); return (<OptionCard key={k} title={d.nome} right={`@prod ${fmtR(pj.custoAtProduzida)}`} rightSub={`R$${d.custo_dia}/dia · conv ${d.conv}`} desc={d.desc} selected={cfg.dieta===k} onClick={()=>setK("dieta",k)} dica={{volumoso:"dietaVolumoso",silagem:"dietaSilagem",altoGrao:"dietaAltoGrao",premium:"dietaPremium"}[k]} onTip={setTip}/>); })}
+      footer={<>{navBack}<PrimaryBtn onClick={next} label="Próximo →"/></>}/></Wrap>;
+
+    if (key==="hedge") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={cockRes} activeIdx={1} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Hedge" dica="hedge" onTip={setTip}
+      desc="Travar preço de venda no mercado futuro (B3/BGI) protege contra queda — em troca de abrir mão do ganho se o mercado subir."
+      options={Object.entries(HEDGES).map(([k,h])=>(<OptionCard key={k} title={h.nome} right={h.custo_pct>0?`custa ${(h.custo_pct*100).toFixed(1).replace(".",",")}%`:"grátis"} desc={h.desc} selected={cfg.hedge===k} onClick={()=>setK("hedge",k)} dica={{nenhum:"hedgeNenhum",parcial:"hedgeParcial",total:"hedgeTotal"}[k]} onTip={setTip}/>))}
+      footer={<>{navBack}<PrimaryBtn onClick={next} label="Próximo →"/></>}/></Wrap>;
+
+    if (key==="abate") return <Wrap tip={tip} setTip={setTip}><DecisionScreen camp={camp} res={cockRes} activeIdx={1} sub={stepN/total} dateLine={dateLine} n={stepN} total={total} title="Ponto de abate" dica="pontoAbate" onTip={setTip}
+      desc="Onde mirar o acabamento. Mais dias = mais arrobas, mas a eficiência cai no fim e o curral fica ocupado mais tempo (você ainda decide a venda no abate)."
+      options={Object.entries(SAIDAS).map(([k,s])=>{ const pj=simularGiro({...baseCfg,saida:k}); return (<OptionCard key={k} title={s.nome} right={`${pj.dias} dias`} rightSub={`@sai ${fmtAt(pj.atSaida)}`} desc={s.desc} selected={cfg.saida===k} onClick={()=>setK("saida",k)} dica={{antecipado:"saiAntecipado",alvo:"saiAlvo",tardio:"saiTardio"}[k]} onTip={setTip}/>); })}
+      footer={<>{navBack}<PrimaryBtn onClick={next} label="Revisar →"/></>}/></Wrap>;
+
+    if (key==="revisao") {
+      const r=proj;
+      return <Wrap tip={tip} setTip={setTip}><Shell camp={camp} res={r} showCockpit={!!r} activeIdx={1} sub={1} dateLine={dateLine} onTip={setTip}
+        footer={<>{navBack}<PrimaryBtn onClick={iniciarGiro} label={`Confirmar e comprar 🐄`} disabled={!r||r.lote<20}/></>}>
+        <div style={{marginBottom:16}}><DecisionTitle n={stepN} total={total} title="Revisar o lote" dica="projecao" onTip={setTip} desc="O cockpit acima mostra a projeção. Confira o lote e a relação de troca antes de comprar."/></div>
+        {r ? <>
+          <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:17,marginBottom:13}}>
+            <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:14}}>
+              {[["Região",REGIOES[camp.regiao].nome],["Reposição",CATEGORIAS[cfg.categoria].nome],["Genética",GENETICAS[cfg.genetica].nome],["Dieta",DIETAS[cfg.dieta].nome],["Financ.",`${cfg.financ_pct*100}%`],["Hedge",HEDGES[cfg.hedge].nome],["Abate",SAIDAS[cfg.saida].nome]].map(([l,v])=>(<span key={l} style={{fontSize:10.5,fontFamily:SANS,color:C.dim,background:C.bg,border:`1px solid ${C.bord}`,borderRadius:8,padding:"5px 9px"}}>{l}: <strong style={{color:C.txt}}>{v}</strong></span>))}
+            </div>
+            <div style={{display:"flex",gap:18,flexWrap:"wrap"}}>
+              <div><div style={{fontSize:25,fontWeight:700,fontFamily:MONO,color:C.acc,lineHeight:1}}>{fmt(r.lote)}</div><div style={{fontSize:10,color:C.dim,fontFamily:SANS,marginTop:3}}>cabeças · {MESES[m]}→{MESES[r.mesVenda]}</div></div>
+              <div style={{borderLeft:`1px solid ${C.bord}`,paddingLeft:18}}><div style={{fontSize:18,fontFamily:MONO,color:C.txt}}>{fmtRk(r.saidaCompra)}</div><div style={{fontSize:10,color:C.dim,fontFamily:SANS,marginTop:3}}>desembolso próprio</div></div>
+              <div style={{borderLeft:`1px solid ${C.bord}`,paddingLeft:18}}><div style={{fontSize:18,fontFamily:MONO,color:r.resultadoLote>=0?C.grn:C.red}}>{(r.resultadoLote>=0?"+":"")+fmtRk(r.resultadoLote)}</div><div style={{fontSize:10,color:C.dim,fontFamily:SANS,marginTop:3}}>resultado projetado</div></div>
+            </div>
+          </div>
+          <CustoTotalCard res={r} onTip={setTip}/>
+          {r.lote<20 && <div style={{marginTop:12,background:C.red+"12",border:`1px solid ${C.red}33`,borderRadius:12,padding:14,fontSize:12.5,color:C.red,fontFamily:SANS}}>Caixa insuficiente para um lote viável. Aumente o financiamento, escolha reposição mais leve, ou aguarde.</div>}
+        </> : <div style={{color:C.red,fontFamily:SANS}}>Erro na projeção.</div>}
+      </Shell></Wrap>;
+    }
+  }
+
+  // ── GIRO mês a mês ──
+  if (fase==="giro" && giro) {
+    const res = giro.res, passo = giro.passo, nM = res.nMeses;
+    const frac = passo/nM;
+    const diasDec = Math.round(res.dias*frac);
+    const pesoDec = res.pesoVivoEntrada + (res.pesoVivoSaida-res.pesoVivoEntrada)*frac;
+    const atDec = res.atEntrada + (res.atSaida-res.atEntrada)*frac;
+    const atProdDec = Math.max(0.01, atDec - res.atEntrada);
+    const engordaAcumCab = (res.custoRacaoCab+res.custoSanidadeCab+res.custoFixoCab+res.jurosFinancCab)*frac;
+    const custoTotalAtDec = (res.custoMagroCab + engordaAcumCab)/atDec;
+    const custoAtProdDec = engordaAcumCab/atProdDec;
+    const gordoMes = precoGordoAt(camp.regiao,(res.mes+passo)%12)*GENETICAS[cfg.genetica].valor_bonus;
+    const margemDec = gordoMes - custoTotalAtDec;
+    const ativo = passo>0, fim = passo>=nM;
+    // cockpit progressivo
+    const resProg = { ...res, precoEquilibrio:custoTotalAtDec, custoAtProduzida:ativo?custoAtProdDec:res.custoAtProduzida,
+      gordoSpotVenda:gordoMes, margemCab: ativo?(margemDec*res.atSaida):res.margemCab };
+    const evLabel = passo===0?"Entrada no curral":fim?"Pronto para abate":`${MESES[(res.mes+passo-1)%12]} · mês ${passo}/${nM}`;
+    return <Wrap tip={tip} setTip={setTip}><Shell camp={camp} res={resProg} showCockpit activeIdx={2} sub={frac} dateLine={evLabel.toUpperCase()} onTip={setTip}
+      footer={fim ? <PrimaryBtn onClick={()=>setFase("venda")} label="Levar ao abate →"/> : <PrimaryBtn onClick={()=>setGiro(g=>({...g,passo:g.passo+1}))} label={passo===nM-1?"Último mês →":`Avançar p/ ${MESES[(res.mes+passo)%12]} →`}/>}>
+      <div style={{marginBottom:13}}><Calendario mesAtual={(res.mes+Math.min(passo,nM-1))%12} ocupados={Array.from({length:nM},(_,i)=>(res.mes+i)%12)} onTip={setTip} mini/></div>
+      <h2 style={{margin:"0 0 3px",fontSize:25,fontFamily:SERIF,fontStyle:"italic",fontWeight:600}}>{passo===0?"🐄 Lote na entrada":fim?"🏁 Lote terminado":"📈 Engordando"}</h2>
+      <div style={{fontSize:12,color:C.dim,fontFamily:SANS,marginBottom:16}}>{CATEGORIAS[cfg.categoria].nome} · {GENETICAS[cfg.genetica].nome} · {fmt(res.lote)} cab · {diasDec}/{res.dias} dias</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+        <MetricMini label="Peso vivo" value={fmt(pesoDec)+" kg"} dica="arroba" onTip={setTip}/>
+        <MetricMini label="@ carcaça" value={fmtAt(atDec)} dica="arroba" onTip={setTip}/>
+        <MetricMini label="@ produzidas" value={fmtAt(atProdDec)} dica="custoAtProd" onTip={setTip}/>
+      </div>
+      <CustoTotalCard res={res} progresso={{atEntrada:res.atEntrada,atProd:atProdDec,magroAt:res.custoMagroCab/res.atEntrada,engordaAt:ativo?custoAtProdDec:0,gordo:gordoMes}} onTip={setTip}/>
+    </Shell></Wrap>;
+  }
+
+  // ── VENDA (decisão do preço) ──
+  if (fase==="venda" && giro) {
+    const baseRes = giro.res;
+    const resV = simularGiro({ ...baseCfg, segurarMeses:segurar });
+    const mesVendaAtual = (baseRes.mes + baseRes.nMeses + segurar) % 12;
+    const spotAgora = precoGordoAt(camp.regiao, mesVendaAtual)*GENETICAS[cfg.genetica].valor_bonus;
+    const proxMes = (mesVendaAtual+1)%12;
+    const spotProx = precoGordoAt(camp.regiao, proxMes)*GENETICAS[cfg.genetica].valor_bonus;
+    const vender = ()=>{ const r=simularGiro({...baseCfg,segurarMeses:segurar}); finalizar(r); };
+    const finalizar = (r)=>{ setGiro(g=>({...g,res:r,vendido:true})); setFase("fechamento"); };
+    return <Wrap tip={tip} setTip={setTip}><Shell camp={camp} res={resV} showCockpit activeIdx={3} sub={1} dateLine={`${MESES[mesVendaAtual].toUpperCase()} · decisão de venda`} onTip={setTip}
+      footer={<><GhostBtn onClick={()=>setSegurar(s=>s+1)} label="Segurar +1 mês ⏳"/><PrimaryBtn onClick={vender} label={`Vender a ${fmtR(spotAgora)}/@ ✓`}/></>}>
+      <div style={{marginBottom:16}}><DecisionTitle n={1} total={1} title="Vender ou segurar?" dica="venda" onTip={setTip} desc={HEDGES[cfg.hedge].pct>0?`Você travou ${HEDGES[cfg.hedge].pct*100}% no hedge — essa parte já está garantida. Decida o restante.`:"Sem hedge: você está 100% no spot. Decida a hora de tirar."}/></div>
+      <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:18,marginBottom:13}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div><div style={{fontSize:10,color:C.dim,fontFamily:SANS,textTransform:"uppercase",letterSpacing:".06em"}}>Spot hoje ({MESES[mesVendaAtual]})</div><div style={{fontSize:28,fontWeight:700,fontFamily:MONO,color:C.acc}}>{fmtR(spotAgora)}<span style={{fontSize:14,color:C.dim}}>/@</span></div></div>
+          <div style={{textAlign:"right"}}><div style={{fontSize:10,color:C.dim,fontFamily:SANS,textTransform:"uppercase",letterSpacing:".06em"}}>Próx. mês ({MESES[proxMes]})</div><div style={{fontSize:20,fontWeight:700,fontFamily:MONO,color:spotProx>spotAgora?C.grn:C.red}}>{fmtR(spotProx)}<span style={{fontSize:12,color:C.dim}}>/@</span></div><div style={{fontSize:10,color:spotProx>spotAgora?C.grn:C.red,fontFamily:SANS}}>{spotProx>spotAgora?"▲ tende a subir":"▼ tende a cair"}</div></div>
+        </div>
+        <div style={{borderTop:`1px solid ${C.bord}`,paddingTop:12,fontSize:12,color:C.dim,fontFamily:SANS,lineHeight:1.5}}>
+          {segurar>0 && <span style={{color:C.orn}}>Segurando há {segurar} {segurar>1?"meses":"mês"}: +{fmtAt(resV.atSaida-baseRes.atSaida)} de peso, porém pagando diária e fixo extras. </span>}
+          Segurar aposta na alta da entressafra, mas boi terminado engorda pouco e o curral fica ocupado. Vender garante o preço de hoje.
+        </div>
+      </div>
+      <MetricMini label="Resultado se vender agora" value={(resV.resultadoLote>=0?"+":"")+fmtRk(resV.resultadoLote)} cor={resV.resultadoLote>=0?C.grn:C.red} sub={`margem ${fmtR(resV.margemCab)}/cab · ROE ${fmtP(resV.resultadoLote/Math.max(resV.saidaCompra,1))}`} dica="margemCab" onTip={setTip}/>
+    </Shell></Wrap>;
+  }
+
+  // ── FECHAMENTO do giro ──
+  if (fase==="fechamento" && giro) {
+    const res = giro.res;
+    const continuar = ()=>setCamp(c=>{
+      const nm = c.mes + res.nMeses;
+      const nc = { ...c, caixa:res.caixaFinal, mes:nm, giros:[...c.giros,{ ...res, cat:cfg.categoria, gen:cfg.genetica, diet:cfg.dieta }] };
+      if (nm>=12 || (nm+3)>12) setTimeout(()=>setFase("anual"),0); else setTimeout(()=>{ setStep(0); setCfg(CFG0); setFase("setup"); },0);
+      return nc;
     });
+    return <Wrap tip={tip} setTip={setTip}><Fechamento res={res} camp={camp} cfg={cfg} onContinuar={continuar} onVerFluxo={()=>setFase("fluxo")} onTip={setTip}/></Wrap>;
+  }
 
-    import React from 'react';
-    import { createRoot } from 'react-dom/client';
+  // ── FLUXO DE CAIXA do giro ──
+  if (fase==="fluxo" && giro) {
+    return <Wrap tip={tip} setTip={setTip}><FluxoCaixa res={giro.res} camp={camp} onVoltar={()=>setFase("fechamento")} onTip={setTip}/></Wrap>;
+  }
 
-    // Babel transform inline
-    const jsxCode = await fetch('./agro-gp-pecuaria.jsx').then(r => r.text());
+  return <Wrap tip={tip} setTip={setTip}><div style={{background:C.bg,minHeight:"100vh"}}/></Wrap>;
+}
 
-    const transformed = Babel.transform(jsxCode, {
-      presets: ['react'],
-      plugins: [],
-    }).code;
+function Wrap({ children, tip, setTip }) {
+  return <div style={{background:C.bg}}><style>{FONT_CSS}</style>{children}{tip&&<Tip dica={tip} onClose={()=>setTip(null)}/>}</div>;
+}
 
-    const blob = new Blob([transformed], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    const mod = await import(url);
-    const App = mod.default;
+// Card de custo total por @ (equilíbrio) com decomposição magro × engorda
+function CustoTotalCard({ res, progresso, onTip }) {
+  const magroAt = progresso ? progresso.magroAt : res.custoMagroCab/res.atEntrada;
+  const atEntrada = progresso ? progresso.atEntrada : res.atEntrada;
+  const atProd = progresso ? progresso.atProd : res.atProduzidas;
+  const engordaAt = progresso ? progresso.engordaAt : res.custoAtProduzida;
+  const gordo = progresso ? progresso.gordo : res.gordoSpotVenda;
+  const atTot = atEntrada+atProd;
+  const totalAt = (magroAt*atEntrada + engordaAt*atProd)/atTot;
+  const margem = gordo - totalAt;
+  const pctMagro = Math.round(magroAt*atEntrada/(magroAt*atEntrada+engordaAt*Math.max(0.01,atProd))*100);
+  const linha=(emoji,nome,at,preco)=>(<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0"}}>
+    <span style={{fontSize:12,color:C.dim,fontFamily:SANS,display:"flex",alignItems:"center",gap:7}}><span style={{fontSize:14}}>{emoji}</span>{nome}</span>
+    <span style={{fontSize:12,fontFamily:MONO,color:C.txt}}><span style={{color:C.dim}}>{fmtAt(at)} ×</span> <strong>{fmtR(preco)}/@</strong></span></div>);
+  return (
+    <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:"15px 17px"}}>
+      <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".06em",textTransform:"uppercase",display:"flex",alignItems:"center",marginBottom:4}}>Custo total por @ <span style={{color:C.mut,marginLeft:5,textTransform:"none",letterSpacing:0}}>(equilíbrio real)</span><InfoBtn dica="custoTotal" onOpen={onTip}/></div>
+      <div style={{fontSize:29,fontWeight:700,fontFamily:MONO,color:C.acc,lineHeight:1.05,marginBottom:11}}>{fmtR(totalAt)}<span style={{fontSize:14,color:C.dim}}>/@</span></div>
+      <div style={{borderTop:`1px solid ${C.bord}`}}>{linha("🐂","Magro comprado",atEntrada,magroAt)}<div style={{borderTop:`1px solid ${C.bord}`}}/>{linha("🌾","Engorda no cocho",atProd,engordaAt)}</div>
+      <div style={{fontSize:10,color:C.mut,fontFamily:SANS,marginTop:4}}>O magro é {pctMagro}% do custo — preço travado na compra.</div>
+      <div style={{marginTop:11,paddingTop:11,borderTop:`1px solid ${C.bord}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:12,color:C.dim,fontFamily:SANS}}>Vende a {fmtR(gordo)}/@ → margem real</span>
+        <span style={{fontSize:16,fontWeight:700,fontFamily:MONO,color:margem>=0?C.grn:C.red}}>{margem>=0?"+":""}{fmtR(margem)}/@</span>
+      </div>
+    </div>
+  );
+}
 
-    createRoot(document.getElementById('root')).render(React.createElement(App));
-  </script>
+function DRErow({ label, val, cor, bold, dica, onTip }) {
+  return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:`1px solid ${C.bord}`}}>
+    <span style={{fontSize:12,color:C.dim,fontFamily:SANS,display:"flex",alignItems:"center"}}>{label}{dica&&<InfoBtn dica={dica} onOpen={onTip}/>}</span>
+    <span style={{fontSize:bold?14:12,fontWeight:bold?700:400,fontFamily:MONO,color:cor||C.txt}}>{val}</span></div>;
+}
 
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+function Fechamento({ res, camp, cfg, onContinuar, onVerFluxo, onTip }) {
+  const pos = res.resultadoLote>=0;
+  const roe = res.resultadoLote/Math.max(res.saidaCompra,1);
+  const selicCiclo = taxaPeriodo(SELIC_AA,res.dias);
+  return (
+    <Shell camp={camp} res={res} showCockpit activeIdx={4} sub={1} dateLine={`${MESES[res.mes].toUpperCase()}→${MESES[res.mesVenda].toUpperCase()} · giro fechado`} onTip={onTip}
+      footer={<><GhostBtn onClick={onVerFluxo} label="Fluxo de caixa"/><PrimaryBtn onClick={onContinuar} label="Continuar →"/></>}>
+      <div style={{background:pos?C.grn+"12":C.red+"12",border:`1px solid ${(pos?C.grn:C.red)}33`,borderRadius:18,padding:20,marginBottom:14,textAlign:"center"}}>
+        <div style={{fontSize:28,marginBottom:3}}>{pos?"🐄💰":"📉"}</div>
+        <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".07em",textTransform:"uppercase"}}>Resultado do giro</div>
+        <div style={{fontSize:32,fontWeight:700,fontFamily:MONO,color:pos?C.grn:C.red,lineHeight:1.1}}>{pos?"+":""}{fmtR(res.resultadoLote)}</div>
+        <div style={{fontSize:12,color:C.dim,fontFamily:SANS,marginTop:4}}>ROE do giro {fmtP(roe)} vs Selic do ciclo {fmtP(selicCiclo)} · {roe>selicCiclo?"bateu o banco ✓":"abaixo do banco"}</div>
+      </div>
+      <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".06em",textTransform:"uppercase",margin:"6px 2px 8px"}}>DRE por cabeça</div>
+      <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:"6px 16px 12px",marginBottom:13}}>
+        <DRErow label="Receita (venda do gordo)" val={fmtR(res.receitaCab)} cor={C.grn} bold dica="gordoVenda" onTip={onTip}/>
+        <DRErow label="(−) Compra do magro" val={"("+fmtR(res.custoMagroCab)+")"} dica="relacaoTroca" onTip={onTip}/>
+        <DRErow label="(−) Ração" val={"("+fmtR(res.custoRacaoCab)+")"} dica="diaria" onTip={onTip}/>
+        <DRErow label="(−) Sanidade/manejo" val={"("+fmtR(res.custoSanidadeCab)+")"}/>
+        <DRErow label="(−) Custo fixo (rateio)" val={"("+fmtR(res.custoFixoCab)+")"} dica="estProfissional" onTip={onTip}/>
+        {res.jurosFinancCab>0&&<DRErow label="(−) Juros financiamento" val={"("+fmtR(res.jurosFinancCab)+")"} dica="financiamento" onTip={onTip}/>}
+        <DRErow label="Margem por cabeça" val={(res.margemCab>=0?"+":"")+fmtR(res.margemCab)} cor={res.margemCab>=0?C.grn:C.red} bold dica="margemCab" onTip={onTip}/>
+      </div>
+      <CustoTotalCard res={res} onTip={onTip}/>
+      <div style={{height:13}}/>
+      <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".06em",textTransform:"uppercase",margin:"6px 2px 8px"}}>DRE do lote ({fmt(res.lote)} cabeças)</div>
+      <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:"6px 16px 12px"}}>
+        <DRErow label="Resultado operacional" val={(res.resultadoOperacional>=0?"+":"")+fmtR(res.resultadoOperacional)} cor={res.resultadoOperacional>=0?C.grn:C.red}/>
+        <DRErow label="(+) Selic sobre o caixa" val={"+"+fmtR(res.selicGanho)} cor={C.blue} dica="selicCaixa" onTip={onTip}/>
+        <DRErow label="Resultado do giro (caixa)" val={(pos?"+":"")+fmtR(res.resultadoLote)} cor={pos?C.grn:C.red} bold/>
+      </div>
+    </Shell>
+  );
+}
+
+function FluxoCaixa({ res, camp, onVoltar, onTip }) {
+  const maxAbs = Math.max(...res.fluxo.map(f=>Math.abs(f.entrada-f.saida)),1);
+  return (
+    <Shell camp={camp} res={res} showCockpit={false} activeIdx={4} sub={1} dateLine="Fluxo de caixa do giro" onTip={onTip}
+      footer={<PrimaryBtn onClick={onVoltar} label="← Voltar ao fechamento"/>}>
+      <div style={{marginBottom:14}}><DecisionTitle n={1} total={1} title="Fluxo de caixa" dica="fluxoCaixa" onTip={onTip} desc="Entradas e saídas mês a mês, com o saldo correndo. É o que separa gestor de amador: saber quando o caixa aperta."/></div>
+      <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:"8px 14px 14px"}}>
+        {res.fluxo.map((f,i)=>{
+          const liq=f.entrada-f.saida; const pos=liq>=0;
+          return (<div key={i} style={{padding:"10px 0",borderBottom:i<res.fluxo.length-1?`1px solid ${C.bord}`:"none"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+              <span style={{fontSize:12.5,fontFamily:SANS,color:C.txt}}><strong style={{color:C.acc,fontFamily:MONO}}>{MESES[f.mes]}</strong> · {f.rotulo}</span>
+              <span style={{fontSize:12.5,fontFamily:MONO,fontWeight:700,color:pos?C.grn:C.red}}>{pos?"+":"−"}{fmtRk(Math.abs(liq))}</span>
+            </div>
+            <div style={{height:5,background:C.bg,borderRadius:3,overflow:"hidden",display:"flex"}}><div style={{width:`${Math.abs(liq)/maxAbs*100}%`,background:pos?C.grn:C.red,borderRadius:3}}/></div>
+            <div style={{fontSize:10,color:C.dim,fontFamily:MONO,marginTop:4,textAlign:"right"}}>saldo: {fmtRk(f.saldo)}</div>
+          </div>);
+        })}
+      </div>
+      <div style={{marginTop:12,fontSize:11.5,color:C.dim,fontFamily:SANS,lineHeight:1.55,padding:"0 4px"}}>
+        Repare no mês da compra: o caixa despenca. Durante a engorda, drena com ração e fixo (e rende Selic no que sobra). Na venda, recompõe — e liquida o financiamento, se houver.
+      </div>
+    </Shell>
+  );
+}
+
+function Anual({ camp, onReiniciar, onTip }) {
+  const lucro = camp.caixa-CAPITAL_INICIAL;
+  const roe = lucro/CAPITAL_INICIAL;
+  const pos = lucro>0;
+  const g = camp.giros;
+  const corRoe = roe>SELIC_AA?C.grn:roe>0?C.orn:C.red;
+  const melhor = g.length?g.reduce((a,b)=>b.resultadoLote>a.resultadoLote?b:a):null;
+  const pior = g.length?g.reduce((a,b)=>b.resultadoLote<a.resultadoLote?b:a):null;
+  const totalCab = g.reduce((s,x)=>s+Math.round(x.loteVivo),0);
+  const nota = roe>SELIC_AA+0.10?["Craque","🏆"]:roe>SELIC_AA?["Profissional","⭐"]:roe>0?["Competente","👍"]:["Iniciante","📉"];
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",color:C.txt,paddingBottom:120}}>
+      <div style={{maxWidth:540,margin:"0 auto",padding:"34px 20px 0"}}>
+        <div style={{fontSize:10.5,fontFamily:SANS,letterSpacing:".12em",textTransform:"uppercase",color:C.orn,marginBottom:13}}>Fim da campanha · diagnóstico</div>
+        <div style={{background:pos?C.grn+"12":C.red+"12",border:`1px solid ${(pos?C.grn:C.red)}33`,borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
+          <div style={{fontSize:32,marginBottom:5}}>{nota[1]}</div>
+          <div style={{fontSize:21,fontFamily:SERIF,fontStyle:"italic",fontWeight:600,color:corRoe}}>Gestor {nota[0]}</div>
+          <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".07em",textTransform:"uppercase",marginTop:8,display:"flex",justifyContent:"center",alignItems:"center"}}>ROE do ano vs Selic 14,5%<InfoBtn dica="roeSelic" onOpen={onTip}/></div>
+          <div style={{fontSize:40,fontWeight:700,fontFamily:MONO,color:corRoe,lineHeight:1.05}}>{roe>0?"+":""}{fmtP(roe)}</div>
+          <div style={{fontSize:12,color:C.dim,fontFamily:SANS,marginTop:4}}>Caixa final {fmtRM(camp.caixa)} · {roe>SELIC_AA?"bateu a Selic ✓":"abaixo da Selic"}</div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:13}}>
+          <MetricMini label="Giros" value={fmt(g.length)} onTip={onTip}/>
+          <MetricMini label="Cabeças/ano" value={fmt(totalCab)} onTip={onTip}/>
+          <MetricMini label="Meses ociosos" value={fmt(camp.mesesOciosos)} dica="ociosidade" onTip={onTip}/>
+        </div>
+        {g.length>0 && <div style={{background:C.surf,border:`1px solid ${C.bord}`,borderRadius:16,padding:16,marginBottom:13}}>
+          <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".06em",textTransform:"uppercase",marginBottom:10}}>Histórico de giros</div>
+          {g.map((x,i)=>(<div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:i<g.length-1?`1px solid ${C.bord}`:"none"}}>
+            <span style={{fontSize:11.5,color:C.dim,fontFamily:SANS}}>#{i+1} · {MESES[x.mes]}→{MESES[x.mesVenda]} · {CATEGORIAS[x.cat].emoji}{GENETICAS[x.gen].emoji} · {fmt(Math.round(x.loteVivo))} cab</span>
+            <span style={{fontSize:12.5,fontWeight:700,fontFamily:MONO,color:x.resultadoLote>0?C.grn:C.red}}>{x.resultadoLote>0?"+":""}{fmtRk(x.resultadoLote)}</span>
+          </div>))}
+        </div>}
+        {melhor&&pior&&g.length>1 && <div style={{background:C.acc+"10",border:`1px solid ${C.acc}30`,borderRadius:16,padding:16,marginBottom:16}}>
+          <div style={{fontSize:10,color:C.dim,fontFamily:SANS,letterSpacing:".06em",textTransform:"uppercase",marginBottom:8,display:"flex",alignItems:"center"}}>Diagnóstico<InfoBtn dica="janela" onOpen={onTip}/></div>
+          <p style={{margin:0,fontSize:12.5,color:C.txt,fontFamily:SANS,lineHeight:1.6}}>Melhor giro: início em <strong style={{color:C.grn}}>{MESES[melhor.mes]}</strong> ({fmtRk(melhor.resultadoLote)}). Pior: <strong style={{color:C.red}}>{MESES[pior.mes]}</strong> ({fmtRk(pior.resultadoLote)}). {melhor.mes>=3&&melhor.mes<=6?"Você acertou a janela — comprar na safra e vender na entressafra. É o que separa o craque.":"Mire comprar reposição entre abril e junho e vender o gordo entre agosto e setembro: a janela da entressafra."}</p>
+        </div>}
+      </div>
+      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"linear-gradient(transparent, rgba(10,12,7,.96) 28%)",padding:"22px 16px 18px"}}><div style={{maxWidth:540,margin:"0 auto"}}><button onClick={onReiniciar} style={{width:"100%",padding:16,background:C.acc,color:"#15170f",border:"none",borderRadius:13,fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:SANS}}>🔄 Nova campanha</button></div></div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// EXPLICAÇÕES (DICAS) — toque nos ⓘ
+// ════════════════════════════════════════════════════════════════════════════════
+const DICAS = {
+  cockpit: { titulo:"O cockpit do gestor", secoes:[
+    { label:"O que é", texto:"A faixa fixa no topo com 9 indicadores em 3 blocos: Resultado/Gestão, Comercial e Operacional. São os números que o confinador profissional acompanha todo dia." },
+    { label:"Por que importa", texto:"Eles recalculam a cada escolha sua e a cada mês do giro. Ler esses números juntos — não isolados — é o que forma um gestor." },
+  ]},
+  janela: { titulo:"A janela do confinamento", secoes:[
+    { label:"O que é", texto:"O período em que comprar magro barato, alimentar barato e vender o gordo caro se alinham. Classicamente: comprar na safra (abr-jun) e vender na entressafra seca (ago-set)." },
+    { label:"Por que existe", texto:"Na seca falta boi terminado no pasto, então o gordo atinge o pico. Quem confinou na safra entrega justamente nessa janela de preço alto." },
+    { label:"A lição", texto:"Achar QUANDO confinar vale mais que qualquer outra escolha. O mesmo lote pode dar lucro ou prejuízo só mudando o mês de compra." },
+  ]},
+  sazonalidade: { titulo:"Sazonalidade dos preços", secoes:[
+    { label:"Boi gordo", texto:"Cai nas águas e na safra (mais oferta de boi de pasto), sobe forte na entressafra seca (jul-set), quando falta boi terminado." },
+    { label:"Milho", texto:"Mais caro no começo do ano (estoque velho), despenca na colheita da safrinha (jun-jul) — a ração fica mais barata." },
+    { label:"Reposição", texto:"Acompanha o gordo, com prêmio nas águas, quando o boi de capim está escasso e o pasto promete." },
+  ]},
+  milho: { titulo:"Preço do milho", secoes:[
+    { label:"Por que importa", texto:"O milho é o principal ingrediente energético da ração — pode ser 25% a 40% do custo do confinamento. Milho barato derruba o custo da @ produzida." },
+    { label:"Sazonal", texto:"Despenca na colheita da safrinha (jun-jul), quando entra milho novo. Mais caro no começo do ano, com o estoque velho. Comprar/confinar com milho barato é meio caminho do lucro." },
+    { label:"Regional", texto:"Mato Grosso produz e tem o milho mais barato; São Paulo importa de outras praças e paga mais caro." },
+  ]},
+  precoEquilibrio: { titulo:"Preço de equilíbrio (breakeven)", secoes:[
+    { label:"O que é", texto:"A @ mínima de venda do boi gordo para não ter prejuízo: custo total (magro + engorda + fixo + juros) ÷ @ totais vendidas." },
+    { label:"Como usar", texto:"Compare sempre com o gordo na venda. Acima do equilíbrio = lucro; abaixo = prejuízo, por mais eficiente que tenha sido a engorda." },
+    { label:"O cuidado", texto:"Inclui o magro, que é ~70% do custo e foi travado na compra. Por isso um cocho eficiente pode perder se o magro foi caro." },
+  ]},
+  margemCab: { titulo:"Margem por cabeça", secoes:[
+    { label:"O que é", texto:"O lucro (ou prejuízo) operacional de cada animal: receita da venda menos todos os custos, por cabeça alojada." },
+    { label:"Referência", texto:"Num bom giro, R$ 800 a R$ 1.200 por cabeça é excelente. Negativo significa que o lote destruiu valor." },
+  ]},
+  roeSelic: { titulo:"ROE vs Selic — bateu o banco?", secoes:[
+    { label:"O que é", texto:"ROE é o retorno sobre o capital próprio investido. Comparamos com a Selic (14,5%aa) porque esse dinheiro poderia render no banco, sem risco." },
+    { label:"A régua do gestor", texto:"Lucro não basta: tem que superar a Selic do período. Se o giro rende menos que o banco, você assumiu o risco do boi à toa." },
+    { label:"Alavancagem", texto:"Financiar parte do lote a 12,5% (abaixo da Selic) deixa o caixa próprio rendendo 14,5% — multiplica o ROE. Mas amplia o prejuízo num giro ruim." },
+  ]},
+  relacaoTroca: { titulo:"Relação de troca", secoes:[
+    { label:"O que é", texto:"Quantas arrobas de boi gordo são necessárias para comprar o animal de reposição. O mercado indexa em torno de 19@." },
+    { label:"O número-rei comercial", texto:"Se o magro custa muitas @ de gordo, você paga caro na reposição. Comprar com relação de troca baixa é metade do lucro do giro." },
+    { label:"A pegadinha", texto:"Dá pra produzir a arroba barata no cocho e ainda assim perder, se comprou o magro com relação de troca ruim. O magro é ~70% do boi." },
+  ]},
+  agioReposicao: { titulo:"Ágio da reposição", secoes:[
+    { label:"O que é", texto:"Quanto a @ do magro está acima (ágio) da @ do gordo, em %. Reposição quase sempre custa mais por @ que o gordo." },
+    { label:"Por categoria", texto:"Bezerro tem ágio alto (paga-se caro pela arroba leve, cheia de potencial); boi magro pesado tem ágio baixo (quase pronto)." },
+    { label:"Alerta", texto:"Ágio acima de ~15% aperta a conta: você paga muito pela reposição frente ao que vai receber no gordo." },
+  ]},
+  gordoVenda: { titulo:"Preço do boi gordo", secoes:[
+    { label:"O que é", texto:"O valor da @ de carcaça do boi terminado, na sua praça e no mês da venda." },
+    { label:"Regional", texto:"São Paulo paga mais (perto do consumo); Mato Grosso desconta (longe do abate); Goiás no meio." },
+    { label:"Decisão", texto:"Você decide quando vender: travar no hedge na montagem e/ou vender ou segurar no abate." },
+  ]},
+  diaria: { titulo:"Diária (custo por cabeça/dia)", secoes:[
+    { label:"O que é", texto:"Quanto cada animal custa por dia no cocho: ração + sanidade + manejo. O pulso operacional do confinamento." },
+    { label:"Por que monitorar", texto:"Multiplicada por milhares de cabeças e dezenas de dias, define o custo da engorda. Centavos por dia viram muito dinheiro." },
+  ]},
+  custoAtProd: { titulo:"Custo da @ produzida", secoes:[
+    { label:"O que é", texto:"Quanto custa fabricar cada arroba NOVA no cocho: (ração + sanidade + fixo + juros) ÷ @ produzidas. Não inclui o magro." },
+    { label:"Benchmark real", texto:"ICAP fev/2026: ~R$197/@ no Centro-Oeste e ~R$215/@ no Sudeste. É o indicador de eficiência da engorda." },
+    { label:"Atenção", texto:"Mede só a engorda. Para saber se o giro lucra, olhe o custo TOTAL por @ (com o magro) e o preço de equilíbrio." },
+  ]},
+  gmdConv: { titulo:"GMD e conversão alimentar", secoes:[
+    { label:"GMD", texto:"Ganho Médio Diário: kg de peso vivo por dia. Quanto maior, mais rápido termina o lote e libera o curral." },
+    { label:"Conversão", texto:"Kg de ração por kg de ganho. Menor é melhor (5,2:1 ótimo, 7:1 fraco). Mais grão converte melhor, mas custa mais." },
+    { label:"Trade-off", texto:"Dieta forte = mais GMD e melhor conversão, porém maior custo/dia e dependência do milho. O gestor equilibra." },
+  ]},
+  custoTotal: { titulo:"Custo total por @ — o equilíbrio real", secoes:[
+    { label:"O que é", texto:"O custo médio de cada arroba do boi pronto, somando o magro comprado com a engorda. O preço mínimo de venda para não perder." },
+    { label:"As duas parcelas", texto:"🐂 Magro comprado: as @ que já vinham no boi, ao preço travado na compra. 🌾 Engorda: as @ produzidas no cocho, ao seu custo." },
+    { label:"A lição central", texto:"O magro é ~70% e está fixo desde a compra. Mesmo com engorda barata, se o magro foi caro o custo total sobe e pode passar do preço de venda." },
+  ]},
+  financiamento: { titulo:"Financiamento (custeio pecuário)", secoes:[
+    { label:"O que é", texto:"Financiar 0% a 100% do lote a 12,5%aa (crédito rural subsidiado, abaixo da Selic). O banco paga; você devolve principal + juros na venda." },
+    { label:"Por que alavanca", texto:"O valor financiado não sai do caixa, que continua rendendo Selic 14,5%. Você paga 12,5% e ganha 14,5% — e compra um lote maior." },
+    { label:"O risco", texto:"Alavancagem multiplica o ROE nos dois sentidos: amplia o lucro num giro bom, aprofunda o prejuízo num giro ruim." },
+  ]},
+  selicCaixa: { titulo:"Selic sobre o caixa", secoes:[
+    { label:"O que é", texto:"Dinheiro parado na conta rende Selic (~1,13% ao mês). Mesmo esperando a janela, o caixa não fica ocioso de verdade." },
+    { label:"No resultado", texto:"Resultado do giro = resultado operacional + Selic que o caixa rendeu. Por isso financiar (mais caixa livre) aumenta essa linha." },
+  ]},
+  fluxoCaixa: { titulo:"Fluxo de caixa", secoes:[
+    { label:"O que é", texto:"O movimento real de dinheiro mês a mês: quando sai (compra, ração, fixo, juros) e entra (venda, Selic), com o saldo correndo." },
+    { label:"Separa gestor de amador", texto:"O lucro só aparece no fim, mas o caixa pode apertar no meio. Saber quando o saldo fica baixo evita vender boi na pressa, a preço ruim." },
+  ]},
+  ociosidade: { titulo:"Meses ociosos", secoes:[
+    { label:"O que é", texto:"Meses com o curral vazio (você esperou a janela). Continua pagando o custo fixo, mas o caixa rende Selic." },
+    { label:"O dilema", texto:"Esperar a janela pode valer a pena, mas curral vazio é fixo queimando. O ganho da janela compensa a ociosidade?" },
+  ]},
+  projecao: { titulo:"Projeção do giro", secoes:[
+    { label:"O que é", texto:"A estimativa do resultado SE nada de imprevisto acontecer, no cenário de preços esperado. Serve para comparar escolhas antes de comprar." },
+    { label:"Atenção", texto:"É um guia, não garantia. O mercado pode se mover entre compra e venda — por isso existem o hedge e a decisão de segurar." },
+  ]},
+  venda: { titulo:"Vender ou segurar?", secoes:[
+    { label:"A decisão", texto:"No abate você vê o spot do mês e decide: vender agora (garante o preço) ou segurar mais um mês (aposta em alta)." },
+    { label:"Custo de segurar", texto:"Boi terminado engorda pouco (~45% do normal), mas continua comendo e ocupando o curral. Só compensa se o preço subir o bastante." },
+    { label:"Hedge", texto:"A parte travada no hedge já está garantida — a decisão de vender ou segurar vale para a parte não travada." },
+  ]},
+  arroba: { titulo:"A arroba (@)", secoes:[
+    { label:"O que é", texto:"1 @ = 15 kg de CARCAÇA (não de peso vivo). O boi é negociado em @ de carcaça." },
+    { label:"Rendimento", texto:"Carcaça ÷ peso vivo. Um boi de 540 kg vivos a 54% dá ~19,4 @. Genética e acabamento melhoram o rendimento." },
+  ]},
+  regiao: { titulo:"Região", secoes:[{ label:"O que define", texto:"A praça onde você compra e vende: preço do gordo, do milho e ágio da reposição. Fixa para a campanha." }]},
+  regMT: { titulo:"Mato Grosso", secoes:[{ label:"Perfil", texto:"Milho barato (produzido na região), boi gordo descontado por estar longe dos centros de abate. Bom para diluir custo de ração." }]},
+  regGO: { titulo:"Goiás", secoes:[{ label:"Perfil", texto:"Equilíbrio: acesso razoável a frigoríficos e milho intermediário. A escolha mais balanceada." }]},
+  regSP: { titulo:"São Paulo", secoes:[{ label:"Perfil", texto:"Boi gordo mais valorizado (perto do consumo), porém milho e reposição mais caros. Margem vem do preço de venda." }]},
+  estrutura: { titulo:"Estrutura", secoes:[{ label:"O que define", texto:"O nível do confinamento: custo fixo mensal, eficiência (GMD) e mortalidade. O fixo corre todo mês, cheio ou vazio." }]},
+  estSimples: { titulo:"Estrutura simples", secoes:[{ label:"Perfil", texto:"Baixo custo fixo (R$30k/mês), mas desempenho menor e mais mortalidade. Para minimizar o custo fixo." }]},
+  estProfissional: { titulo:"Estrutura profissional", secoes:[{ label:"Perfil", texto:"Custo fixo médio (R$45k/mês) com bom manejo: +5% GMD e menos perdas. Melhor custo-benefício para a maioria." }]},
+  estHightech: { titulo:"Estrutura high-tech", secoes:[{ label:"Perfil", texto:"Alto custo fixo (R$70k/mês), máximo desempenho (+10% GMD) e mortalidade mínima. Compensa em lotes grandes e eficientes." }]},
+  categoria: { titulo:"Categoria de reposição", secoes:[
+    { label:"O que define", texto:"Que animal você compra: peso de entrada, dias de cocho, ágio e relação de troca. A decisão comercial central." },
+    { label:"O trade-off", texto:"Leve (bezerro): pouco capital/cabeça, ágio alto, muitas @ a produzir, cocho longo. Pesado (boi magro): muito capital, ágio baixo, gira rápido, agrega poucas @." },
+  ]},
+  catBezerro: { titulo:"Bezerro (~12@ vivas)", secoes:[
+    { label:"Estratégia", texto:"~240 kg, ~140 dias. Barato no total e cabe muita cabeça, mas ágio alto por @. Produz muitas arrobas — joga na eficiência." },
+    { label:"Risco", texto:"Cocho longo = mais exposição ao milho e mais tempo de capital parado." }]},
+  catGarrote: { titulo:"Garrote (~15@ vivas)", secoes:[
+    { label:"Estratégia", texto:"~300 kg, ~110 dias. Meio-termo equilibrado entre capital, ágio e tempo de cocho. A escolha versátil." }]},
+  catBoiMagro: { titulo:"Boi magro (~19@ vivas)", secoes:[
+    { label:"Estratégia", texto:"~390 kg, ~85 dias. Melhor relação de troca (ágio baixo) e giro rápido. Mas exige muito capital por cabeça e agrega poucas @." },
+    { label:"Quando brilha", texto:"Para girar rápido e vender numa janela próxima, ou quando a relação de troca do boi magro está atraente." }]},
+  genetica: { titulo:"Genética", secoes:[{ label:"O que define", texto:"Velocidade de ganho (GMD), rendimento de carcaça e bonificação no preço. Melhor genética custa mais na reposição." }]},
+  genComum: { titulo:"Nelore comum", secoes:[{ label:"Perfil", texto:"Padrão da pecuária brasileira. Sem custo extra, desempenho de referência. Rústico e confiável." }]},
+  genCruzado: { titulo:"Cruzado F1", secoes:[{ label:"Perfil", texto:"Cruzamento industrial (Angus × Nelore): ganha ~12% mais rápido, rende melhor, carcaça premiada. Custa mais, mas compensa." }]},
+  genPremium: { titulo:"Genética premium", secoes:[{ label:"Perfil", texto:"O topo: máximo GMD (+20%), melhor rendimento e bonificação alta. Caro na entrada — exige eficiência para justificar." }]},
+  dieta: { titulo:"Dieta", secoes:[{ label:"O que define", texto:"Custo por dia, velocidade de ganho, conversão alimentar e dependência do preço do milho." }]},
+  dietaVolumoso: { titulo:"Volumoso+", secoes:[{ label:"Perfil", texto:"Mais capim/silagem, pouco grão. Barata por dia (R$11), ganho lento e conversão fraca (7:1). Menos exposta ao milho." }]},
+  dietaSilagem: { titulo:"Silagem", secoes:[{ label:"Perfil", texto:"Silagem de milho + concentrado (R$14/dia). Equilíbrio custo × ganho. A dieta versátil do confinamento." }]},
+  dietaAltoGrao: { titulo:"Alto grão", secoes:[{ label:"Perfil", texto:"Muito grão (R$18/dia). Ganho rápido e ótima conversão (5,6:1), mas cara e sensível ao milho." }]},
+  dietaPremium: { titulo:"Dieta premium", secoes:[{ label:"Perfil", texto:"Máximo desempenho com aditivos (R$22/dia). Conversão excelente (5,2:1). Só compensa com boa genética e milho controlado." }]},
+  hedge: { titulo:"Hedge (trava de preço)", secoes:[
+    { label:"O que é", texto:"Travar o preço de venda no mercado futuro (B3, contrato BGI) na montagem. Protege contra queda do boi." },
+    { label:"O custo", texto:"Tem pequena taxa e você abre mão do ganho se o mercado subir. Paga-se um prêmio pela tranquilidade." }]},
+  hedgeNenhum: { titulo:"Sem trava", secoes:[{ label:"Perfil", texto:"Vende tudo no spot do abate. Máximo upside se subir, máximo risco se cair. Para quem lê bem o mercado." }]},
+  hedgeParcial: { titulo:"Travar 50%", secoes:[{ label:"Perfil", texto:"Trava metade, deixa metade no spot. Protege parte da margem e mantém parte do potencial de alta." }]},
+  hedgeTotal: { titulo:"Travar 100%", secoes:[{ label:"Perfil", texto:"Trava toda a venda: resultado previsível. Ideal quando a margem travada já é boa e você não quer arriscar." }]},
+  pontoAbate: { titulo:"Ponto de abate", secoes:[
+    { label:"O que é", texto:"Onde mirar o acabamento. Mais dias = mais @, mas o rendimento marginal cai e o curral fica ocupado mais tempo." }]},
+  saiAntecipado: { titulo:"Abate antecipado", secoes:[{ label:"Perfil", texto:"Tira ~15 dias antes. Menos @, mas libera o curral mais cedo e economiza ração." }]},
+  saiAlvo: { titulo:"No ponto", secoes:[{ label:"Perfil", texto:"O acabamento ideal, no tempo padrão da categoria. A escolha equilibrada." }]},
+  saiTardio: { titulo:"Abate tardio", secoes:[{ label:"Perfil", texto:"Segura ~20 dias a mais. Mais @, mas eficiência decai (boi quase pronto engorda menos) e ocupa o curral mais tempo." }]},
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+} catch (e) {
+  document.getElementById("err").style.display = "block";
+  document.getElementById("err").textContent = "Erro: " + (e && e.message ? e.message : e) + "\n\n" + (e && e.stack ? e.stack : "");
+}
+</script>
 </body>
 </html>
