@@ -666,13 +666,17 @@ function App() {
     const gordoMes = precoGordoAt(camp.regiao,(res.mes+passo)%12)*GENETICAS[cfg.genetica].valor_bonus;
     const margemDec = gordoMes - custoTotalAtDec;
     const ativo = passo>0, fim = passo>=nM;
+    const mesCorrente = (res.mes + passo) % 12;          // mês em que o lote está agora
+    const mesProximo = (res.mes + passo + 1) % 12;        // para onde o botão avança
     // cockpit progressivo
     const resProg = { ...res, precoEquilibrio:custoTotalAtDec, custoAtProduzida:ativo?custoAtProdDec:res.custoAtProduzida,
       gordoSpotVenda:gordoMes, margemCab: ativo?(margemDec*res.atSaida):res.margemCab };
-    const evLabel = passo===0?"Entrada no curral":fim?"Pronto para abate":`${MESES[(res.mes+passo-1)%12]} · mês ${passo}/${nM}`;
+    const evLabel = passo===0 ? `${MESES[res.mes]} · entrada no curral`
+                  : fim ? `${MESES[mesCorrente]} · pronto para abate`
+                  : `${MESES[mesCorrente]} · ${passo}º mês de cocho`;
     return <Wrap tip={tip} setTip={setTip}><Shell camp={camp} res={resProg} showCockpit activeIdx={2} sub={frac} dateLine={evLabel.toUpperCase()} onTip={setTip}
-      footer={fim ? <PrimaryBtn onClick={()=>setFase("venda")} label="Levar ao abate →"/> : <PrimaryBtn onClick={()=>setGiro(g=>({...g,passo:g.passo+1}))} label={passo===nM-1?"Último mês →":`Avançar p/ ${MESES[(res.mes+passo)%12]} →`}/>}>
-      <div style={{marginBottom:13}}><Calendario mesAtual={(res.mes+Math.min(passo,nM-1))%12} ocupados={Array.from({length:nM},(_,i)=>(res.mes+i)%12)} onTip={setTip} mini/></div>
+      footer={fim ? <PrimaryBtn onClick={()=>setFase("venda")} label="Levar ao abate →"/> : <PrimaryBtn onClick={()=>setGiro(g=>({...g,passo:g.passo+1}))} label={`Avançar p/ ${MESES[mesProximo]} →`}/>}>
+      <div style={{marginBottom:13}}><Calendario mesAtual={mesCorrente} ocupados={Array.from({length:nM},(_,i)=>(res.mes+i)%12)} onTip={setTip} mini/></div>
       <h2 style={{margin:"0 0 3px",fontSize:25,fontFamily:SERIF,fontStyle:"italic",fontWeight:600}}>{passo===0?"🐄 Lote na entrada":fim?"🏁 Lote terminado":"📈 Engordando"}</h2>
       <div style={{fontSize:12,color:C.dim,fontFamily:SANS,marginBottom:16}}>{CATEGORIAS[cfg.categoria].nome} · {GENETICAS[cfg.genetica].nome} · {fmt(res.lote)} cab · {diasDec}/{res.dias} dias</div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
